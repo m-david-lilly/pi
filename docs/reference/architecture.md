@@ -122,7 +122,7 @@ composable.
 ┌──────────────────────────────────────────────────────────────────┐
 │  MANAGEMENT                                                      │
 │  luci + luci-app-mwan3 + luci-app-adblock + luci-app-pbr +       │
-│  luci-app-wireguard   (web UI; read/write of /etc/config/*)      │
+│  luci-proto-wireguard   (web UI; read/write of /etc/config/*)    │
 └──────────────────────────────────────────────────────────────────┘
         │ reads/writes UCI config; does not sit in the data path
         ▼

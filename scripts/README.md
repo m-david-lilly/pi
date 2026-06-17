@@ -27,7 +27,7 @@ grep -q '/usr/bin/wan-weight.sh' /etc/crontabs/root \
 ```
 
 Prerequisites (see the runbook for the full build): `mwan3`, `librespeed-cli`,
-`conntrack-tools`, `wireguard-tools`, `pbr`, and the members/policies the scripts
+`conntrack`, `wireguard-tools`, `pbr`, and the members/policies the scripts
 reference (`wan_m1_w1` / `wanb_m1_w1`, pbr policy `lan_via_vpn`).
 
 ## Known deploy-time gap — DNS through the tunnel

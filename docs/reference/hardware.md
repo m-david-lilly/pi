@@ -25,7 +25,10 @@ The Pi 5 uses the Broadcom **BCM2712** SoC: a quad-core **ARM Cortex-A76** runni
 Pi 5 support reached **stable** OpenWrt with the **24.10** series (24.10.0 released
 2025-02-06). Always build against the **current stable release** — check the live source
 for the exact version, as point releases ship regularly (verify against
-<https://downloads.openwrt.org/releases/>). There is no reason to run a snapshot build:
+<https://downloads.openwrt.org/releases/>). As of 2026-06-16 the Firmware Selector
+offered **25.12.4** (build `r32933-4ccb782af7`) as current stable for `bcm27xx/bcm2712`
+`rpi-5` — verified at flash time; re-check for a newer point release before re-flashing.
+There is no reason to run a snapshot build:
 
 - Snapshots ship **without LuCI** preinstalled and carry **no stability guarantee**.
 - Stable releases give you reproducible versions and the LuCI web UI out of the box.
@@ -288,10 +291,11 @@ luci-app-adblock
 # VPN (Goal 3)
 wireguard-tools
 kmod-wireguard
-luci-app-wireguard
+luci-proto-wireguard            # WireGuard LuCI integration (NOT luci-app-wireguard on 25.12.x)
 pbr                             # policy-based routing for split/on-demand VPN
 luci-app-pbr
 dnsmasq-full                    # required for domain-based VPN policies (replaces stock dnsmasq)
+conntrack                       # `conntrack` CLI for the mwan3.user WG flush (NOT conntrack-tools)
 
 # Web UI
 luci

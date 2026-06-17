@@ -14,6 +14,13 @@ DNS filtering and an on-demand Surfshark WireGuard VPN.
   will not boot.
 - This build uses OpenWrt **fw4 (nftables)**, the default since 22.03 (verify your exact
   stable release against the live OpenWrt source).
+- **Package manager: `apk`, not `opkg`.** OpenWrt 25.x (verified on 25.12.4, 2026-06-16)
+  replaced `opkg` with `apk` — `opkg` is **not present**. This runbook uses `apk`:
+  `apk update` (refresh index), `apk add <pkg>` (install), `apk del <pkg>` (remove),
+  `apk list --installed` (list), `apk info <pkg>` (details). On an older release that
+  still ships `opkg`, translate back accordingly. If you pre-baked the stack via the
+  Firmware Selector (recommended — see hardware.md §7), most `apk add` steps below are
+  already satisfied; verify with `apk list --installed | grep <pkg>` and skip as noted.
 
 ### Topology used throughout
 
@@ -50,6 +57,8 @@ Optionally pre-bake packages via the [Firmware Selector](https://firmware-select
 # Replace <VER> with the current stable release for this target.
 # Do NOT trust a hard-coded version here — verify the current stable against the
 # live Firmware Selector / downloads.openwrt.org listing before downloading.
+# (As of 2026-06-16 the selector offered 25.12.4 for bcm27xx/bcm2712 rpi-5;
+#  re-verify, since point releases ship regularly.)
 VER="<VER>"
 BASE="https://downloads.openwrt.org/releases/${VER}/targets/bcm27xx/bcm2712"
 IMG="openwrt-${VER}-bcm27xx-bcm2712-rpi-5-squashfs-factory.img.gz"
@@ -156,7 +165,7 @@ plug an internet uplink into a USB NIC after drivers are installed (chicken-and-
 If drivers are NOT pre-baked, temporarily reconfigure `eth0` as a DHCP WAN client:
 
 ```bash
-# Temporary: make onboard eth0 a DHCP client to reach the internet for opkg.
+# Temporary: make onboard eth0 a DHCP client to reach the internet for apk.
 uci set network.wan='interface'
 uci set network.wan.device='eth0'
 uci set network.wan.proto='dhcp'
@@ -179,7 +188,7 @@ uci commit network
 Identify the chipset first if the adapters are plugged in:
 
 ```bash
-opkg update
+apk update
 lsusb
 dmesg | grep -iE 'rtl815|ax881|usbnet|eth'
 ```
@@ -188,10 +197,10 @@ Install the driver matching your adapters (RTL8153 is the default recommendation
 
 ```bash
 # Realtek RTL8152/RTL8153 (most common: UGREEN, Anker, TP-Link UE300)
-opkg install kmod-usb-net-rtl8152
+apk add kmod-usb-net-rtl8152
 
 # OR ASIX AX88179 / AX88178A
-# opkg install kmod-usb-net-asix-ax88179
+# apk add kmod-usb-net-asix-ax88179
 ```
 
 **Expected:** package installs and pulls firmware (e.g. `r8152-firmware`).
@@ -323,22 +332,27 @@ dnsmasq is preinstalled. Adblock (Phase 5) plugs into it. For VPN domain policie
 swap stock dnsmasq for `dnsmasq-full` now to avoid a reinstall:
 
 `dnsmasq-full` conflicts with stock `dnsmasq`: both provide `/etc/init.d/dnsmasq` and the
-`dnsmasq` virtual, so `opkg install dnsmasq-full` on its own ABORTS with a file/dependency
-conflict — opkg does NOT silently remove the stock package for you. You must remove stock
-dnsmasq first, in the same shell, so DNS is only briefly absent. Download the replacement
-before removing, so a download failure does not strand you with no resolver at all. You can
-skip this swap if you will not use domain-based VPN policies (Phase 7), but doing it now
-avoids a later reinstall.
+`dnsmasq` virtual, so installing `dnsmasq-full` while stock `dnsmasq` is present is a
+conflict the package manager will not silently resolve by removing the stock package. Remove
+stock dnsmasq first, in the same shell, so DNS is only briefly absent; fetch the replacement
+before removing, so a download failure does not strand you with no resolver. You can skip
+this swap if you will not use domain-based VPN policies (Phase 7), but doing it now avoids a
+later reinstall.
+
+> **apk caveat — verify on device.** The exact conflict/replace semantics differ between
+> `apk` (25.x) and the old `opkg`. If you pre-baked `dnsmasq-full` into the image (this
+> build did), this whole swap is **already done** — confirm with the verify step below and
+> skip the commands. If you must swap live, apk may accept `apk add dnsmasq-full` directly
+> (resolving the conflict by replacing stock dnsmasq) — try that first; fall back to the
+> explicit fetch/del/add sequence only if apk refuses. Test before trusting.
 
 ```bash
-opkg update
-# Pre-download dnsmasq-full so we don't remove the working resolver before we have its
-# replacement on disk.
-opkg download dnsmasq-full
-# Remove stock dnsmasq, then install the cached full build. --cache reuses the file just
-# downloaded so this works even with no internet mid-swap.
-opkg remove dnsmasq
-opkg install --cache . dnsmasq-full
+apk update
+# Pre-fetch dnsmasq-full so the working resolver isn't removed before its replacement is
+# on disk. (If `apk add dnsmasq-full` alone succeeds, you can skip the fetch/del dance.)
+apk fetch dnsmasq-full
+apk del dnsmasq
+apk add dnsmasq-full
 /etc/init.d/dnsmasq restart
 ```
 
@@ -346,7 +360,7 @@ opkg install --cache . dnsmasq-full
 > the domain-policy features Phase 7 relies on are absent and will fail there, not here:
 >
 > ```bash
-> opkg list-installed | grep -E '^dnsmasq'   # expect: dnsmasq-full ... (NOT plain dnsmasq)
+> apk list --installed | grep -E '^dnsmasq'   # expect: dnsmasq-full ... (NOT plain dnsmasq)
 > ```
 
 **Verify:**
@@ -360,7 +374,7 @@ ubus call dhcp ipv4leases            # leases being handed out
 ### 3.4 LuCI web UI (if not pre-baked)
 
 ```bash
-opkg install luci
+apk add luci
 /etc/init.d/uhttpd restart
 ```
 
@@ -378,10 +392,10 @@ single-stream, not 200.
 ### 4.1 Install
 
 ```bash
-opkg update
-opkg install mwan3 luci-app-mwan3
+apk update
+apk add mwan3 luci-app-mwan3
 # fw4/nftables systems still need the iptables-nft compatibility shim for mwan3:
-opkg install iptables-nft
+apk add iptables-nft
 ```
 
 **Verify:**
@@ -490,8 +504,8 @@ runs XL/XXL tiers.
 ### 5.1 Install
 
 ```bash
-opkg update
-opkg install adblock luci-app-adblock
+apk update
+apk add adblock luci-app-adblock
 ```
 
 ### 5.2 Backend + feeds
@@ -573,7 +587,7 @@ uci commit firewall
 ### 5.5 Encrypted upstream (optional, privacy)
 
 ```bash
-opkg install https-dns-proxy        # DoH forwarder (Cloudflare/Quad9 by default)
+apk add https-dns-proxy        # DoH forwarder (Cloudflare/Quad9 by default)
 /etc/init.d/https-dns-proxy restart
 
 # VERIFY the proxy is actually listening before you cut dnsmasq over to it — otherwise
@@ -634,10 +648,10 @@ from `mwan3 use`.
 ### 6.1 Install the probe
 
 ```bash
-opkg update
-opkg install librespeed-cli jsonfilter
+apk update
+apk add librespeed-cli jsonfilter
 # curl is an optional lighter fallback:
-# opkg install curl
+# apk add curl
 ```
 
 > **Verify flag names.** The healthcheck script below assumes `librespeed-cli` accepts
@@ -809,8 +823,8 @@ balances all non-VPN flows and still tracks/fails over the underlying WANs.
 ### 7.1 Install
 
 ```bash
-opkg update
-opkg install wireguard-tools kmod-wireguard pbr luci-app-pbr
+apk update
+apk add wireguard-tools kmod-wireguard pbr luci-app-pbr
 # pbr deps (resolveip, ip-full) are pulled automatically. dnsmasq-full (Phase 3.3)
 # is required for domain-based VPN policies.
 ```
@@ -935,7 +949,9 @@ mwan3 failover. Flush only the wg endpoint flow on transitions so it re-handshak
 the surviving WAN.
 
 ```bash
-opkg install conntrack-tools     # provides the `conntrack` CLI used below
+apk add conntrack            # provides the `conntrack` CLI used below
+# (package is `conntrack` on 25.12.x — NOT `conntrack-tools`, which does not
+#  exist in this release's feed; verified against the live build 2026-06-16)
 cat > /etc/mwan3.user <<'EOF'
 # Flush the WireGuard endpoint conntrack on a WAN transition so the tunnel
 # re-handshakes over the surviving WAN. Do NOT flush all conntrack (strands downloads).
@@ -1106,7 +1122,7 @@ mwan3 interfaces        # wan + wanb online
 mwan3 policies          # balanced split reflects current weights
 # Per-flow stickiness check: two simultaneous large downloads should each pin to one WAN.
 # Inspect conntrack marks:
-conntrack -L 2>/dev/null | head   # requires conntrack-tools (installed in Phase 7.6)
+conntrack -L 2>/dev/null | head   # requires the `conntrack` package (installed in Phase 7.6)
 # Failover: unplug WAN1's uplink, confirm flows survive on wanb within ~30s:
 mwan3 interfaces        # wan -> offline, wanb still online; re-plug to recover
 ```

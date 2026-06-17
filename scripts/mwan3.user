@@ -8,7 +8,7 @@
 # dead uplink (docs/reference/vpn.md §10, requirements FR-V11).
 #
 # mwan3 exports $ACTION (ifup|ifdown|connected|disconnected) and $INTERFACE (the
-# WAN). Requires the `conntrack-tools` package (provides the `conntrack` CLI).
+# WAN). Requires the `conntrack` package (provides the `conntrack` CLI).
 #
 # Race note: this hook shares NO mutable state with vpn-toggle.sh except the
 # kernel conntrack table — it never writes UCI, never runs ifup/ifdown, never

@@ -82,7 +82,7 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords (MU
 | FR-H9 | Should | Reweighting SHOULD prefer `mwan3 ifdown/ifup <iface>` over a full `mwan3 restart` where possible, since `restart` briefly tears down all rules and can blip in-flight flows. |
 | FR-H10 | Should | Every run SHOULD log `mbps`, computed weight, and applied weight via `logger -t wan-weight` for tuning. |
 | FR-H11 | Could | A metered-link mode COULD downgrade a capped uplink to liveness-only (or a tiny byte-count `curl` probe) to avoid burning a data cap — a full librespeed run can move hundreds of MB per WAN per run. |
-| FR-H12 | Won't | The healthcheck **WON'T** use the Ookla `speedtest` CLI as the default probe (not in opkg feeds; interactive EULA prompt can hang a cron job). librespeed-cli is the chosen tool. |
+| FR-H12 | Won't | The healthcheck **WON'T** use the Ookla `speedtest` CLI as the default probe (not in the package feeds; interactive EULA prompt can hang a cron job). librespeed-cli is the chosen tool. |
 | FR-H13 | Should | Capacity reweighting SHOULD continue while the VPN is up: probes bind to the raw WAN L3 device (FR-H4) and so measure the underlying WAN, unaffected by the tunnel. A weight change MUST NOT trigger a full `mwan3 restart` that would blip the tunnel's WAN pin — use `mwan3 ifdown/ifup` (FR-H9) and re-handshake via the mwan3.user hook (FR-V11) if the tunnel's WAN changes. |
 
 ### 3.4 Goal 2 — DNS Filtering (FR-F)
@@ -156,7 +156,7 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords (MU
 | --- | --- | --- |
 | NFR-M1 | Must | Configuration MUST use stock OpenWrt UCI files (`/etc/config/{network,firewall,mwan3,dhcp,pbr}`, `/etc/adblock/*`) and standard package CLIs — no out-of-tree forks. |
 | NFR-M2 | Must | Shell scripts (healthcheck, VPN toggle) MUST use descriptive variable names, type/format-checked parsing, and explicit error handling (no silent failures, no generic catch-alls); comments MUST explain "why" not "what". |
-| NFR-M3 | Should | All packages SHOULD be pre-baked via the OpenWrt Firmware Selector (`mwan3`, `luci-app-mwan3`, `adblock`, `luci-app-adblock`, `wireguard-tools`, `kmod-wireguard`, `luci-app-wireguard`, `pbr`, `luci-app-pbr`, `dnsmasq-full`, `librespeed-cli`, `kmod-usb-net-rtl8152`/`-asix-ax88179`, `iptables-nft`) so USB NICs and services come up on first boot. |
+| NFR-M3 | Should | All packages SHOULD be pre-baked via the OpenWrt Firmware Selector (`mwan3`, `luci-app-mwan3`, `adblock`, `luci-app-adblock`, `wireguard-tools`, `kmod-wireguard`, `luci-proto-wireguard`, `pbr`, `luci-app-pbr`, `dnsmasq-full`, `librespeed-cli`, `conntrack`, `kmod-usb-net-rtl8152`/`-asix-ax88179`, `iptables-nft`) so USB NICs and services come up on first boot. (Package names verified against the live 25.12.4 feed 2026-06-16: the WireGuard LuCI integration is `luci-proto-wireguard`, not `luci-app-wireguard`; conntrack tooling is `conntrack`, not `conntrack-tools`.) |
 | NFR-M4 | Should | Scripts SHOULD be idempotent and safe to re-run; cron entries SHOULD live in `/etc/crontabs/root`. |
 | NFR-M5 | Could | A single documented toggle wrapper (SSH alias or LuCI custom-command button) COULD expose VPN on/off to the operator. |
 
@@ -191,7 +191,7 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords (MU
 | OOS-1 | **True line bonding / bandwidth aggregation** of the two WANs into one logical pipe. | mwan3 is per-flow, not bonding. A single TCP stream uses one WAN. Aggregation needs MPTCP/bonding — far more complex and not a project goal. |
 | OOS-2 | **Per-packet load balancing.** | Breaks NAT/TLS/conntrack; per-flow sticky is the explicit, correct model. |
 | OOS-3 | **VPN bandwidth aggregation across both WANs.** | WireGuard rides one WAN at a time; VPN-up = failover-only for tunneled traffic. |
-| OOS-4 | **Ookla `speedtest` CLI** as the capacity probe. | Not in opkg feeds; interactive EULA can hang cron. librespeed-cli used instead. |
+| OOS-4 | **Ookla `speedtest` CLI** as the capacity probe. | Not in the package feeds; interactive EULA can hang cron. librespeed-cli used instead. |
 | OOS-5 | **FireHOL IP blocklists in adblock.** | IP-based, not DNS — belongs in a separate `banip`/nftset firewall layer. |
 | OOS-6 | **Internal Pi 5 radio as primary WiFi AP.** | Weak; a dedicated AP device is recommended. Secondary AP only if needed. |
 | OOS-7 | **A router-egress kill switch.** | pbr `strict_enforcement` only protects forwarded LAN traffic; the router itself can still reach the internet directly. |

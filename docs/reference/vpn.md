@@ -25,14 +25,15 @@
 
 ## 2. Packages
 
-Install on the bcm2712 / aarch64 build:
+Install on the bcm2712 / aarch64 build (OpenWrt 25.x uses `apk`, not `opkg`;
+`luci-proto-wireguard` is the WireGuard LuCI integration on 25.12.x):
 
 ```sh
-opkg update
-opkg install wireguard-tools kmod-wireguard \
-             pbr luci-app-pbr \
-             dnsmasq-full \
-             https-dns-proxy
+apk update
+apk add wireguard-tools kmod-wireguard luci-proto-wireguard \
+        pbr luci-app-pbr \
+        dnsmasq-full \
+        https-dns-proxy
 ```
 
 - `wireguard-tools` + `kmod-wireguard` — the tunnel itself.

@@ -392,7 +392,7 @@ JSON output and is more predictable to parse than curl. When run under
 it *without* `mwan3 use` you MUST add the `ip rule from <WAN_IP>` policy route
 above and pass `--source <WAN_IP>`.
 
-**Fallback: `curl`** (install `opkg install curl`; the stock `uclient-fetch`
+**Fallback: `curl`** (install `apk add curl`; the stock `uclient-fetch`
 won't do this). `--interface 'if!ethN'` binds to the device and reports the
 measured rate plus the local IP the kernel selected for that device:
 
@@ -436,8 +436,9 @@ the script relied on is still correct.
 
 ### 5.2 Tool choice rationale
 
-- **`librespeed-cli`** — recommended. Present in OpenWrt feeds for most targets;
-  **verify against the live feed** for this build (`opkg update && opkg info
+- **`librespeed-cli`** — recommended. Present in OpenWrt feeds for most targets
+  (confirmed `librespeed-cli 1.0.12` installed on 25.12.4 aarch64, 2026-06-16);
+  **verify against the live feed** for your build (`apk update && apk info
   librespeed-cli`) before relying on it — package availability per target/arch
   changes between releases. Flags: `--source`, `--interface`, `--json`,
   `--duration`, `--concurrent`, `--no-upload/--no-download`. Bind it via
@@ -446,7 +447,7 @@ the script relied on is still correct.
 - **`curl`** — light fallback; `--limit-rate` caps the burst, and
   `--interface 'if!ethN'` is a real **device** bind (egress guarantee).
   Interface-binding syntax varies across curl builds — test `if!ethN` first.
-- **Ookla `speedtest`** — **avoid**. Not in opkg feeds; needs a hand-placed
+- **Ookla `speedtest`** — **avoid**. Not in the package feeds; needs a hand-placed
   static binary and an interactive EULA (`--accept-license --accept-gdpr`), which
   easily hangs a cron job on the prompt.
 - **Python `speedtest-cli` (sivel)** — **avoid**. Binds only by `--source` (like
@@ -688,7 +689,8 @@ status` and only ever writes `weight`. It must never call `mwan3 ifup/ifdown` to
   `/etc/init.d/mwan3 enable && /etc/init.d/mwan3 start` (then confirm with
   `mwan3 status`).
 - `librespeed-cli` (primary probe), optionally `curl` (fallback probe)
-- `jsonfilter` (in base), `conntrack-tools` (for conntrack flushing/inspection)
+- `jsonfilter` (in base), `conntrack` (for conntrack flushing/inspection; the
+  package is `conntrack`, not `conntrack-tools`, on 25.12.x)
 - USB NIC driver baked into the image: `kmod-usb-net-rtl8152` + `r8152-firmware`
   (RTL8153 adapters) — pre-select in Firmware Selector so the USB WANs come up
   on first boot.
