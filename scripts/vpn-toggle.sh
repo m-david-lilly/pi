@@ -28,8 +28,10 @@ readonly HANDSHAKE_FRESH=180  # a handshake epoch within N seconds counts as liv
 # return 1 if none. Used so we flip the right anonymous pbr policy section.
 policy_index() {
     i=0
+    # Check section existence (not .name) so an unnamed sibling policy added
+    # later doesn't terminate the scan early.
     while uci -q get "pbr.@policy[${i}]" >/dev/null 2>&1; do
-        if [ "$(uci -q get "pbr.@policy[${i}].name")" = "${POLICY_NAME}" ]; then
+        if [ "$(uci -q get "pbr.@policy[${i}].name" 2>/dev/null)" = "${POLICY_NAME}" ]; then
             printf '%s\n' "${i}"
             return 0
         fi
@@ -69,8 +71,12 @@ vpn_on() {
 
     if [ "${handshook}" != 1 ]; then
         # No fresh handshake — do NOT enable pbr (strict_enforcement would
-        # black-hole the policied LAN). Back the interface out and stay OFF.
+        # black-hole the policied LAN). Back out to the same clean state as a
+        # normal OFF: stop/disable pbr (in case procd started it as an ifup
+        # dependency), down the interface, restore the steady-state flag.
         logger -t vpn-toggle "VPN ON FAILED: no fresh handshake in ${HANDSHAKE_WAIT}s; leaving VPN off"
+        /etc/init.d/pbr stop 2>/dev/null || true
+        /etc/init.d/pbr disable 2>/dev/null || true
         ifdown wgvpn 2>/dev/null || true
         uci set network.wgvpn.disabled='1'
         uci commit network
@@ -78,12 +84,23 @@ vpn_on() {
         return 1
     fi
 
+    # Resolve the policy BEFORE enabling anything. A missing/renamed policy means
+    # turning ON would set the service-level enable with nothing to steer — a
+    # silent no-VPN. Treat it as a config error: back out and abort, don't leave
+    # a half-on state.
+    if ! idx="$(policy_index)"; then
+        logger -t vpn-toggle "VPN ON FAILED: pbr policy '${POLICY_NAME}' not found; leaving VPN off"
+        ifdown wgvpn 2>/dev/null || true
+        uci set network.wgvpn.disabled='1'
+        uci commit network
+        printf "pbr policy '%s' not found; VPN left OFF.\n" "${POLICY_NAME}" >&2
+        return 1
+    fi
+
     # Single authority for the OFF-by-default invariant: flip BOTH the
     # service-level enable and the per-policy enable together.
     uci set pbr.config.enabled='1'
-    if idx="$(policy_index)"; then
-        uci set "pbr.@policy[${idx}].enabled=1"
-    fi
+    uci set "pbr.@policy[${idx}].enabled=1"
     uci commit pbr
     /etc/init.d/pbr enable
     /etc/init.d/pbr reload
@@ -100,8 +117,12 @@ vpn_on() {
 
 vpn_off() {
     # Tear down routing FIRST (kill-switch gone before the iface), then the iface.
+    # A missing policy here is non-fatal — the service-level disable below still
+    # takes effect — but warn, since it signals config drift from POLICY_NAME.
     if idx="$(policy_index)"; then
         uci set "pbr.@policy[${idx}].enabled=0"
+    else
+        logger -t vpn-toggle "WARNING: pbr policy '${POLICY_NAME}' not found on OFF; service-level disable only"
     fi
     uci set pbr.config.enabled='0'
     uci commit pbr

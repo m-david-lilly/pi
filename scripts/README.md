@@ -47,6 +47,9 @@ These have not been run on hardware. Before relying on them:
 - `shellcheck -s sh scripts/*.sh` (clean for the `.sh` files; `mwan3.user` is a
   sourced fragment, not standalone).
 - Confirm `librespeed-cli` flag names on the installed build (`librespeed-cli --help`).
-- Confirm `mwan3 use <iface>` exists (mwan3 ≥ 2.10).
+- Confirm `mwan3 use <iface>` exists (mwan3 ≥ 2.10), and that `mwan3 reload`
+  re-evaluates member weights on the installed build (`mwan3 reload; mwan3 policies`).
+- Confirm the pbr policy name matches `POLICY_NAME` in `vpn-toggle.sh`
+  (`uci show pbr | grep lan_via_vpn`) — `vpn-toggle on` aborts if it can't resolve it.
 - Run `wan-weight.sh` by hand and confirm each probe egressed the intended WAN
   (runbook Phase 6.3), then watch `logread -e wan-weight`.

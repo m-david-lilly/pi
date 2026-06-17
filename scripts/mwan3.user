@@ -17,13 +17,26 @@
 
 case "${ACTION}" in
     ifdown|disconnected|connected)
-        # Flush ONLY the WireGuard endpoint flow (UDP 51820), not all conntrack —
-        # flushing everything would reset every active TCP download. Both
-        # directions: --dport for the outbound flow, --sport for the NAT reply
-        # side, so the re-handshake is forced regardless of which half conntrack
-        # indexed. Each -D is idempotent: deleting an absent flow is a no-op.
-        conntrack -D -p udp --dport 51820 2>/dev/null || true
-        conntrack -D -p udp --sport 51820 2>/dev/null || true
-        logger -t mwan3.user "flushed WG conntrack on ${ACTION} (${INTERFACE}) for re-handshake"
+        # Resolve the tunnel's UDP port from the live wg config rather than
+        # hardcoding 51820 (FR-V11): a mismatched port flushes nothing and tunnel
+        # failover silently breaks. Prefer the running peer endpoint port; fall
+        # back to the UCI peer config, then to the Surfshark default 51820.
+        wg_port="$(wg show wgvpn endpoints 2>/dev/null \
+                   | awk 'NR==1 { n = split($2, a, ":"); print a[n] }')"
+        # Reject a non-numeric result (e.g. a malformed/hostname endpoint field)
+        # so the fallback chain fires rather than handing conntrack a garbage port.
+        case "${wg_port}" in *[!0-9]*|"") wg_port="" ;; esac
+        [ -n "${wg_port}" ] || wg_port="$(uci -q get network.wgpeer.endpoint_port)"
+        case "${wg_port}" in *[!0-9]*|"") wg_port="" ;; esac
+        [ -n "${wg_port}" ] || wg_port=51820
+
+        # Flush ONLY the WireGuard endpoint flow, not all conntrack — flushing
+        # everything would reset every active TCP download. Both directions:
+        # --dport for the outbound flow, --sport for the NAT reply side, so the
+        # re-handshake is forced regardless of which half conntrack indexed. Each
+        # -D is idempotent: deleting an absent flow is a harmless no-op.
+        conntrack -D -p udp --dport "${wg_port}" 2>/dev/null || true
+        conntrack -D -p udp --sport "${wg_port}" 2>/dev/null || true
+        logger -t mwan3.user "flushed WG conntrack (udp/${wg_port}) on ${ACTION} (${INTERFACE})"
         ;;
 esac
