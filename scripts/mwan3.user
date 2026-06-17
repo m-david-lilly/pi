@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/mwan3.user — sourced by mwan3 on every interface tracking event.
+#
+# Purpose: re-handshake the WireGuard tunnel over the surviving WAN on a WAN
+# transition. WireGuard pins its client UDP source port regardless of mwan3 WAN
+# state, so the tunnel's conntrack entry is sticky and will NOT migrate cleanly
+# when the active WAN dies — without this flush the tunnel black-holes on the
+# dead uplink (docs/reference/vpn.md §10, requirements FR-V11).
+#
+# mwan3 exports $ACTION (ifup|ifdown|connected|disconnected) and $INTERFACE (the
+# WAN). Requires the `conntrack-tools` package (provides the `conntrack` CLI).
+#
+# Race note: this hook shares NO mutable state with vpn-toggle.sh except the
+# kernel conntrack table — it never writes UCI, never runs ifup/ifdown, never
+# touches pbr. Its worst case under any toggle/flap interleaving is one wasted,
+# idempotent flush (docs/reference/vpn.md §10).
+
+case "${ACTION}" in
+    ifdown|disconnected|connected)
+        # Flush ONLY the WireGuard endpoint flow (UDP 51820), not all conntrack —
+        # flushing everything would reset every active TCP download. Both
+        # directions: --dport for the outbound flow, --sport for the NAT reply
+        # side, so the re-handshake is forced regardless of which half conntrack
+        # indexed. Each -D is idempotent: deleting an absent flow is a no-op.
+        conntrack -D -p udp --dport 51820 2>/dev/null || true
+        conntrack -D -p udp --sport 51820 2>/dev/null || true
+        logger -t mwan3.user "flushed WG conntrack on ${ACTION} (${INTERFACE}) for re-handshake"
+        ;;
+esac
