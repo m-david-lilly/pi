@@ -254,6 +254,18 @@ ip link show wan2dev   # exists, MAC matches <MAC_WAN2>
 ip link show landev    # exists, MAC matches <MAC_LAN>
 ```
 
+> **Carrier caveat (verified on 25.12.4, 2026-06-17).** The rename `ethN -> <pinned
+> name>` does **NOT** apply while the USB NIC is **carrier-less** (no cable plugged in).
+> Linux cannot rename a device that netifd is mid-setup on, and netifd defers setup of a
+> no-carrier interface — so `ip -br link` keeps showing `eth1`/`eth2` and the pinned name
+> is absent from `ubus call network.device status`, no matter how many times you
+> `reload_config`, `/etc/init.d/network restart`, or reboot. **This is expected, not a
+> failure.** The rename fires the moment the port gets link (a cable to a live device).
+> Consequence for sequencing: you cannot fully verify the MAC pins until the corresponding
+> uplink/LAN cable is attached (Phase 3 onward). Stage the pins + WAN interfaces, then plug
+> in a cable and expect the pinned name to appear at that point — do not chase the missing
+> rename with repeated restarts/reboots while the port is unplugged.
+
 > From here on, refer to the WAN2 USB device as `wan2dev`, the LAN USB device as `landev`,
 > and the onboard NIC as `eth0`. This keeps the config stable across reboots.
 >
