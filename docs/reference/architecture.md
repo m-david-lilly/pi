@@ -23,9 +23,10 @@ For detailed per-subsystem configuration see the sibling reference docs:
 
 - **Board:** Raspberry Pi 5 (BCM2712), aarch64 ARMv8-A Cortex-A76, quad-core
   @ 2.4 GHz, 4 GB RAM.
-- **OpenWrt target:** `bcm27xx/bcm2712`, device profile `rpi-5`, **stable**
-  release (25.12.x series), **squashfs** image. This is NOT ARMv7 — armv7 /
-  bcm2709 / bcm2710 images will not boot.
+- **OpenWrt target:** `bcm27xx/bcm2712`, device profile `rpi-5`, **current
+  stable** release (pin the exact version against the live OpenWrt download
+  page — verify against live source), **squashfs** image. Use only the aarch64
+  image for this target; an image for a different Raspberry Pi target will not boot.
 - **NIC layout:**
   - Onboard gigabit Ethernet (wired to the RP1 I/O controller over a dedicated
     lane, **not** shared with the USB bus) → used as the primary WAN uplink.
@@ -33,13 +34,18 @@ For detailed per-subsystem configuration see the sibling reference docs:
     AX88179 via `kmod-usb-net-asix-ax88179`) on the two USB3 (blue) ports → one
     is the second WAN uplink, one is the LAN port to the switch.
 - **Interface pinning:** USB NIC enumeration order is not guaranteed across
-  reboots (eth1/eth2 can swap). Interfaces are pinned by MAC address in
-  `/etc/config/network` so that the mwan3 member-to-WAN mapping stays stable.
-  This is a correctness requirement for per-flow stickiness and weighting.
+  reboots (eth1/eth2 can swap). **Both** USB NICs — the WAN2 uplink *and* the
+  LAN port — are pinned by MAC address in `/etc/config/network`; the onboard
+  GbE (eth0) is fixed and needs no pin. Pinning the WAN2 NIC keeps the mwan3
+  member-to-WAN mapping stable (a correctness requirement for per-flow
+  stickiness and weighting); pinning the LAN NIC keeps the trusted LAN zone from
+  landing on a WAN slot after a reboot-time swap.
 
-The two USB3 ports share a single ~5 Gbps upstream link to RP1, so two
-simultaneously saturated USB3 NICs contend for that aggregate — fine for two
-~1 Gbps WANs, but do not expect 2 Gbps simultaneous USB throughput.
+The Pi 5's two USB3 ports are **independent 5 Gbps xHCI controllers** in RP1 (not the
+Pi 4's single shared 5 Gbps path), so two USB3 GbE NICs at ~1 Gbps each do not contend at
+the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to the SoC**
+(~16 Gbps), which has ample headroom for 1 GbE + 2×5 Gbps USB. See
+[`./hardware.md`](./hardware.md) §4 for the full bandwidth model.
 
 ---
 
@@ -55,23 +61,24 @@ simultaneously saturated USB3 NICs contend for that aggregate — fine for two
         RP1 dedicated lane      RTL8153 / AX88179
                   │                       │
    ┌──────────────┼───────────────────────┼──────────────────────┐
-   │  Raspberry Pi 5  —  OpenWrt (bcm2712 / aarch64)              │
-   │                                                              │
-   │   WAN1  (network: wan)         WAN2  (network: wanb)         │
-   │   zone: wan   masq=1           zone: wanb  masq=1            │
-   │      │                            │                          │
-   │      └──────────┬─────────────────┘                          │
-   │                 │  mwan3 (per-flow connmark balancer)        │
-   │                 │  + dnsmasq/adblock (DNS plane)             │
-   │                 │  + pbr (VPN policy routing, OFF default)   │
-   │                 │                                            │
-   │             wgvpn (proto wireguard)  ── Surfshark            │
-   │             zone: vpn  masq=1 mtu_fix=1                      │
-   │             route_allowed_ips=0  (OFF by default)           │
-   │                 │                                            │
-   │              LAN (network: lan)                              │
-   │              USB3 GbE #2 (eth2)  zone: lan  masq=0           │
-   └─────────────────┬────────────────────────────────────────────┘
+   │  Raspberry Pi 5  —  OpenWrt (bcm2712 / aarch64)             │
+   │                                                             │
+   │   WAN1  (network: wan)         WAN2  (network: wanb)        │
+   │   zone: wan   masq=1           zone: wanb  masq=1           │
+   │      │                            │                         │
+   │      └──────────┬─────────────────┘                         │
+   │                 │  mwan3 (per-flow connmark balancer)       │
+   │                 │  + dnsmasq/adblock (DNS plane)            │
+   │                 │  + pbr (VPN policy routing, OFF default)  │
+   │                 │                                           │
+   │             wgvpn (proto wireguard)  ── Surfshark           │
+   │             zone: vpn  masq=1 mtu_fix=1                     │
+   │             route_allowed_ips=0 (split via pbr, always)     │
+   │             interface disabled=1  (tunnel OFF by default)   │
+   │                 │                                           │
+   │              LAN (network: lan)                             │
+   │              USB3 GbE #2 (eth2)  zone: lan  masq=0          │
+   └─────────────────┬───────────────────────────────────────────┘
                      │
               ┌──────┴──────┐
               │  LAN switch │
@@ -92,8 +99,11 @@ Logical mapping summary:
 | WAN1 (primary) | onboard GbE | `eth0` → `wan` | `wan` | 1 |
 | WAN2 (secondary) | USB3 GbE #1 | `eth1` → `wanb` | `wanb` | 1 |
 | LAN | USB3 GbE #2 | `eth2` → `lan` | `lan` | 0 |
-| VPN tunnel | (virtual) | `wgvpn` (wireguard) | `vpn` | 1 (`mtu_fix=1`) |
+| VPN tunnel | (virtual) | `wgvpn` (wireguard) | `vpn` | 1 |
 
+> The `vpn` zone also carries `mtu_fix '1'` (a separate zone option, not a value
+> of `masq`) to MSS-clamp tunneled TCP. See §4 for the full per-zone options.
+>
 > Device names `eth0/eth1/eth2` are illustrative. The actual L3 device for each
 > network is resolved at runtime via
 > `ubus call network.interface.<name> status | jsonfilter -e '@.l3_device'` and
@@ -110,47 +120,48 @@ composable.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  MANAGEMENT                                                        │
-│  luci + luci-app-mwan3 + luci-app-adblock + luci-app-pbr +         │
-│  luci-app-wireguard   (web UI; read/write of /etc/config/*)        │
+│  MANAGEMENT                                                      │
+│  luci + luci-app-mwan3 + luci-app-adblock + luci-app-pbr +       │
+│  luci-app-wireguard   (web UI; read/write of /etc/config/*)      │
 └──────────────────────────────────────────────────────────────────┘
         │ reads/writes UCI config; does not sit in the data path
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  PLANE 1 — DNS / FILTERING                                         │
-│  dnsmasq  +  adblock (+ luci-app-adblock)                          │
-│  - adblock returns NXDOMAIN for blocked domains                    │
-│  - feeds: hagezi Pro/Pro++, oisd Big, hagezi TIF, certpl, urlhaus  │
-│  - force-dns (adb_nftforce): DNAT LAN port-53 → local resolver     │
-│  - optional encrypted upstream: https-dns-proxy (DoH) or stubby    │
-│  Acts at DNS resolution time, BEFORE routing. VPN state never      │
-│  breaks it.                                                        │
+│  PLANE 1 — DNS / FILTERING                                       │
+│  dnsmasq  +  adblock (+ luci-app-adblock)                        │
+│  - adblock returns NXDOMAIN for blocked domains                  │
+│  - feeds: hagezi Pro/Pro++, oisd Big, hagezi TIF, certpl, urlhaus│
+│  - force-dns (adb_nftforce): DNAT LAN port-53 → local resolver   │
+│  - optional encrypted upstream: https-dns-proxy (DoH) or stubby  │
+│  Acts at DNS resolution time, BEFORE routing. VPN state never    │
+│  breaks it.                                                      │
 └──────────────────────────────────────────────────────────────────┘
         │ resolved IP handed to the routing decision
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  PLANE 2 — POLICY ROUTING (VPN)                                    │
-│  pbr (+ luci-app-pbr)         OFF by default                       │
-│  - fwmark 0x00010000, mask 0x00ff0000  (distinct from mwan3)       │
-│  - uplink_ip_rules_priority = 900  (BELOW mwan3's 2001-2254 band)  │
-│  - matched flows → wgvpn routing table; unmatched fall through     │
-│  - strict_enforcement=1 = kill switch (drop instead of leak)       │
+│  PLANE 2 — POLICY ROUTING (VPN)                                  │
+│  pbr (+ luci-app-pbr)         OFF by default                     │
+│  - fwmark 0x00010000, mask 0x00ff0000  (distinct from mwan3)     │
+│  - uplink_ip_rules_priority = 900  (numerically lower than mwan3 │
+│    2001-2254 ⇒ evaluated FIRST ⇒ higher precedence)              │
+│  - matched flows → wgvpn routing table; unmatched fall through   │
+│  - strict_enforcement=1 = kill switch (drop instead of leak)     │
 └──────────────────────────────────────────────────────────────────┘
         │ unmatched (non-VPN) flows fall through to:
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  PLANE 3 — WAN BALANCING / FAILOVER                                │
-│  mwan3 (+ luci-app-mwan3)  + iptables-nft conntrack shims          │
-│  - connmark in mangle, mask 0x3F00, ip rules 2001-2254             │
-│  - per-flow (connmark + conntrack) sticky balancing                │
-│  - members same metric, weights from healthcheck → ratio split     │
-│  - mwan3track liveness (track_ip) → mark WAN up/down                │
+│  PLANE 3 — WAN BALANCING / FAILOVER                              │
+│  mwan3 (+ luci-app-mwan3)  + iptables-nft conntrack shims        │
+│  - connmark in mangle, mask 0x3F00, ip rules 2001-2254           │
+│  - per-flow (connmark + conntrack) sticky balancing              │
+│  - members same metric, weights from healthcheck → ratio split   │
+│  - mwan3track liveness (track_ip) → mark WAN up/down             │
 └──────────────────────────────────────────────────────────────────┘
         │ flow assigned to a WAN routing table
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  NAT / EGRESS                                                      │
-│  fw4 (nftables) per-zone masq: wan, wanb, vpn → masq=1             │
+│  NAT / EGRESS                                                    │
+│  fw4 (nftables) per-zone masq: wan, wanb, vpn → masq=1           │
 └──────────────────────────────────────────────────────────────────┘
 
   SUPPORTING:
@@ -164,7 +175,7 @@ Plane summary:
 
 | Plane | Package(s) | Mechanism | Mark / priority | Default state |
 |---|---|---|---|---|
-| DNS filtering | dnsmasq + adblock | NXDOMAIN + port-53 DNAT | n/a (nat DNS handling) | ON |
+| DNS filtering | dnsmasq + adblock | NXDOMAIN + port-53 DNAT | n/a (NAT-layer DNS redirect) | ON |
 | VPN policy routing | pbr | fwmark + ip rule | mark `0x00010000`, mask `0x00ff0000`, prio `900` | **OFF** |
 | WAN balancing | mwan3 | connmark + ip rule | mask `0x3F00`, prio `2001-2254` | ON |
 | NAT | fw4 (nftables) | per-zone `masq` | n/a | ON |
@@ -177,7 +188,8 @@ connmarks.
 
 ## 4. Firewall / zone model (fw4 / nftables)
 
-Modern OpenWrt (22.03+/23.05/24.10/25.12) uses **fw4 (nftables)**. Zones:
+Modern OpenWrt (22.03 and later — verify the exact release against the live
+OpenWrt source) uses **fw4 (nftables)**. Zones:
 
 - **`lan`** — `option network 'lan'`, `masq '0'`, `input/output/forward ACCEPT`
   for LAN-side trust. Source of all client traffic.
@@ -185,8 +197,13 @@ Modern OpenWrt (22.03+/23.05/24.10/25.12) uses **fw4 (nftables)**. Zones:
   `input REJECT`, `forward REJECT`.
 - **`wanb`** — `option network 'wanb'` (USB3 #1), same options as `wan`.
 - **`vpn`** — `option network 'wgvpn'`, `masq '1'`, `mtu_fix '1'`,
-  `forward REJECT`. WireGuard reduces path MTU (~1420); `mtu_fix '1'` MSS-clamps
-  so bulk TCP / HTTPS does not blackhole.
+  `forward REJECT`. WireGuard's per-packet overhead is **60 bytes over IPv4**
+  (20 IP + 8 UDP + 32 WireGuard) ⇒ a 1500-byte path yields MTU **1440**; over
+  IPv6 the outer header is 40 bytes ⇒ 80 bytes total ⇒ MTU 1420. WireGuard's
+  own default MTU is 1420 (the IPv6-safe figure, also fine for IPv4). A
+  conservative ~1412 (see §11) leaves extra headroom for PPPoE or
+  double-encapsulated uplinks. `mtu_fix '1'` MSS-clamps so bulk TCP / HTTPS does
+  not blackhole regardless of which value is set.
 
 Forwardings (each direction is its own stanza):
 
@@ -251,7 +268,12 @@ When the VPN toggle brings `wgvpn` up and enables the relevant pbr policy:
    forwarder to `wgvpn` or policy-route the router's own DNS via `wgvpn`), and
    Surfshark DNS (`<SURFSHARK_DNS_1>` / `<SURFSHARK_DNS_2>`) is set on the wg
    interface. OpenWrt **ignores** the WireGuard peer's `DNS =` line, so resolver
-   routing is configured explicitly; `peerdns` is disabled on the WANs.
+   routing is configured explicitly; `peerdns` is disabled on the WANs. **Note
+   the OFF-state coupling:** the `wgvpn`-bound forwarder fails closed only while
+   it is the active upstream, so the toggle must switch dnsmasq's upstream to
+   this proxy on VPN-ON and back to a non-tunnel forwarder on VPN-OFF — pinning
+   it as the *sole* upstream unconditionally would break DNS in the default-OFF
+   state whenever the tunnel is down. See [`./vpn.md`](./vpn.md) §7 item 3.
 2. **First packet → pbr.** pbr's ip rules sit at priority **900**, *above*
    mwan3's `2001-2254` band, so they are evaluated first. If the flow matches a
    pbr policy (`src_addr` = a LAN subnet/IP/MAC, and/or `dest_addr` = IP or
@@ -268,6 +290,11 @@ When the VPN toggle brings `wgvpn` up and enables the relevant pbr policy:
 5. **Kill switch.** With pbr `strict_enforcement '1'`, policy-matched traffic is
    **dropped** (not leaked out a WAN) whenever `wgvpn` is down. Caveat: this
    protects forwarded LAN traffic only — the router's own egress is not killed.
+   This directly affects the DNS-leak story in step 1: because the router's own
+   resolver egress is router-originated (not forwarded), a tunnel-down event can
+   leak DNS out a physical WAN even with strict_enforcement on. If that leak
+   matters, also policy-route or firewall the router's own DNS egress so it
+   cannot fall back to a WAN when `wgvpn` is down.
 
 **Honest limitation (GOAL 3):** with the tunnel up and `AllowedIPs 0.0.0.0/0`,
 tunneled traffic egresses exactly one WAN at a time. Surfshark/WireGuard cannot
@@ -336,32 +363,32 @@ The healthcheck is **two cooperating layers** with separate jobs. Full detail in
 
 ```
 ┌─ Layer 1: LIVENESS (authoritative up/down) ───────────────────────┐
-│  mwan3track per WAN (built-in, already interface-bound)            │
+│  mwan3track per WAN (built-in, already interface-bound)           │
 │  track_ip = 1.1.1.1, 8.8.8.8 ; reliability 2 ; interval 10 ;      │
 │  down 3 ; up 3                                                    │
 │  → marks WAN up/down, triggers failover. The script NEVER does    │
 │    up/down itself (avoid two sources of truth).                   │
-└────────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────┘
 
 ┌─ Layer 2: CAPACITY → WEIGHT (cron, every ~30 min) ────────────────┐
 │  /usr/bin/wan-weight.sh                                           │
 │  for each WAN (serialized, not concurrent):                       │
 │    1. read mwan3 status; if WAN down → skip (don't probe a dead   │
-│       link)                                                        │
+│       link)                                                       │
 │    2. resolve L3 device:                                          │
-│         ubus call network.interface.<wan> status \               │
-│           | jsonfilter -e '@.l3_device'                          │
+│         ubus call network.interface.<wan> status \                │
+│           | jsonfilter -e '@.l3_device'                           │
 │    3. BIND the probe to that WAN:                                 │
-│         librespeed-cli --interface <dev> --no-upload \           │
-│           --duration 8 --concurrent 2 --json                     │
-│       (or curl --interface if!<dev> against a known large file)   │
+│         librespeed-cli --interface <dev> --no-upload \            │
+│           --duration 8 --concurrent 2 --json                      │
+│       (or curl --interface <dev> against a known large file)      │
 │    4. VERIFY it used the right WAN (assert local_ip == WAN IP)    │
 │    5. EWMA smooth: new = 0.6*old + 0.4*measured (state file)      │
 │    6. weight = clamp(round(mbps), 1, 1000)   ← floor at 1         │
 │  after all WANs, only if a weight changed > ~15%:                 │
 │    uci set mwan3.<member>.weight=<N>; uci commit mwan3;           │
 │    mwan3 restart   (or mwan3 ifdown/ifup to avoid a full reload)  │
-└────────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 Why this shape:
@@ -454,7 +481,7 @@ WireGuard private key is treated as a secret and is never committed.
 
 | Seam | Risk if misconfigured | Resolution |
 |---|---|---|
-| ip-rule priority | pbr default `30000` loses to mwan3 `2001-2254`; VPN policies never match | set pbr `uplink_ip_rules_priority = 900` |
+| ip-rule priority | lower priority number = evaluated first; pbr's documented default (≈`30000` — verify against the running build with `ip rule show`) is evaluated *after* mwan3's `2001-2254`, so mwan3 routes the flow first and VPN policies never match | set pbr `uplink_ip_rules_priority = 900` (numerically below the mwan3 band ⇒ evaluated first) |
 | fwmark masks | widening either mask clobbers the other's connmark | keep mwan3 `0x3F00` and pbr `0x00ff0000` distinct; never widen |
 | tunnel as uplink | adding `wgvpn` to a WAN zone makes mwan3 balance the tunnel | keep `wgvpn` in its own `vpn` zone; it is a pbr target, not an mwan3 member |
 | DNS leak on VPN | dnsmasq upstream egresses non-tunnel WAN, or clients use DoH | route resolver via `wgvpn`, disable WAN `peerdns`, keep force-dns + block DoT/DoH |

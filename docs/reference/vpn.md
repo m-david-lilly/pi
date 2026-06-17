@@ -25,23 +25,28 @@
 
 ## 2. Packages
 
-Install on the bcm2712 / aarch64 build (NOT ARMv7):
+Install on the bcm2712 / aarch64 build:
 
 ```sh
 opkg update
 opkg install wireguard-tools kmod-wireguard \
              pbr luci-app-pbr \
-             dnsmasq-full
+             dnsmasq-full \
+             https-dns-proxy
 ```
 
 - `wireguard-tools` + `kmod-wireguard` — the tunnel itself.
 - `pbr` + `luci-app-pbr` — policy-based routing for on-demand split-tunnel.
-  pbr ≥ 1.1.8 uses the **nftables/fw4** backend only (the iptables/ipset
+  Recent pbr uses the **nftables/fw4** backend only (the legacy iptables/ipset
   backend was dropped); the Pi 5 stable build is fw4-native, so this is fine.
+  *(Verify the exact backend-cutover version against the live pbr source.)*
 - `dnsmasq-full` — **required** for domain-based VPN policies. Stock `dnsmasq`
   cannot populate the `dnsmasq.nftset` that pbr reads for `dest_addr` domains.
   Removing stock dnsmasq and installing `dnsmasq-full` is a one-time swap; do
   it before configuring adblock so both share the same resolver.
+- `https-dns-proxy` — the router's own upstream DNS forwarder. Bound to
+  `wgvpn` when the VPN is ON so router-originated queries traverse the tunnel
+  and fail closed if it drops; see §7 item 3 for the OFF-state caveat.
 
 Depends pulled in automatically by pbr: `resolveip`, `ip-full`.
 
@@ -61,7 +66,7 @@ Depends pulled in automatically by pbr: `resolveip`, `ip-full`.
 |---|---|---|
 | `PrivateKey` | `<WG_PRIVATE_KEY>` | **Secret.** Your local private key. |
 | `Address` | `10.14.0.2/16` | Tunnel address. **Keep the netmask.** |
-| `DNS` | `162.252.172.57`, `149.154.159.92` | Surfshark resolvers. OpenWrt **ignores** the WG `DNS=` line — configure DNS separately (§7). |
+| `DNS` | `162.252.172.57`, `149.154.159.92` | Surfshark resolvers (verify against live Surfshark config). OpenWrt **ignores** the WG `DNS=` line — configure DNS separately (§7). |
 | `[Peer] PublicKey` | `<SERVER_PUBLIC_KEY>` | The chosen server's public key. |
 | `Endpoint` | `xx-yyy.prod.surfshark.com:51820` | UDP. Host varies per server. |
 | `AllowedIPs` | `0.0.0.0/0`, `::/0` | Full-tunnel allowed-IPs. |
@@ -219,22 +224,37 @@ case "$1" in
     uci set network.wgvpn.disabled='0'
     uci commit network
     ifup wgvpn
-    # Wait for a handshake / route before steering traffic
+    # Wait for a FRESH handshake before steering traffic. latest-handshakes
+    # prints "<pubkey>\t<epoch>"; a never-handshaked peer shows 0. awk avoids
+    # relying on a literal tab inside a regex (grep BRE would mis-handle '\t').
+    # IMPORTANT: do NOT accept any non-zero epoch — after an OFF->ON cycle the
+    # peer can still report the PREVIOUS session's stale timestamp before the
+    # new handshake completes, which would steer traffic into a not-yet-up
+    # tunnel. Require the handshake to be recent (within 180s of now).
     i=0
     while [ "$i" -lt 15 ]; do
-      wg show wgvpn latest-handshakes 2>/dev/null | grep -qv '	0$' && break
+      wg show wgvpn latest-handshakes 2>/dev/null \
+        | awk -v now="$(date +%s)" \
+          'BEGIN{ok=1} { if ($2 != 0 && (now - $2) < 180) ok=0 } END{ exit ok }' \
+        && break
       sleep 1; i=$((i+1))
     done
+    # Service-level ON only steers traffic if at least one pbr policy is
+    # enabled (see §8). Enable the desired policy too, or this is a no-op.
     uci set pbr.config.enabled='1'
     uci commit pbr
     service pbr reload
-    logger -t vpn-toggle "VPN ON (pbr policies active)"
+    # Switch dnsmasq's upstream to the wgvpn-bound proxy (fail-closed) per §7
+    # item 3 — concrete commands live in setup.md Phase 7.
+    logger -t vpn-toggle "VPN ON (pbr service reloaded; ensure a policy is enabled)"
     ;;
   off)
     # Tear down routing first, then the interface
     uci set pbr.config.enabled='0'
     uci commit pbr
     service pbr reload
+    # Restore dnsmasq's non-tunnel upstream per §7 item 3 so OFF-state DNS
+    # keeps working — concrete commands live in setup.md Phase 7.
     ifdown wgvpn
     uci set network.wgvpn.disabled='1'
     uci commit network
@@ -250,6 +270,16 @@ esac
 
 Expose this via an SSH alias or a LuCI custom-command button. The script never
 prints or logs the private key.
+
+> **DNS-switch ordering (race avoidance).** The order above is deliberate and
+> must be preserved when the concrete commands land in setup.md Phase 7:
+> on **ON**, switch dnsmasq to the `wgvpn`-bound proxy only *after* the
+> handshake wait succeeds — switching earlier dead-zones all DNS for the
+> handshake window. On **OFF**, restore the non-tunnel upstream *before*
+> `ifdown wgvpn` — if dnsmasq is still pointed at the (now device-down)
+> tunnel-bound proxy after the interface drops, it fails closed and breaks
+> default-OFF browsing. Reverse either order and DNS stalls during the
+> transition.
 
 ---
 
@@ -278,16 +308,51 @@ What to enforce:
    MUST NOT egress the non-tunnel WAN), so it needs a committed mechanism, not a
    choice left to install time.
    **Chosen mechanism:** bind the local encrypted forwarder
-   (`https-dns-proxy`) to the `wgvpn` interface so every router-originated
-   upstream query traverses the tunnel. dnsmasq forwards only to the local
-   proxy (`127.0.0.1#5053`); the proxy is the sole egress path and is pinned to
-   `wgvpn`, so when the tunnel is down it cannot fall back to a WAN (fail-closed
-   for the router's own resolver, matching the §9 kill-switch posture for LAN
-   traffic). This is preferred over a pbr policy on the router's own port-53
-   egress because the bound forwarder fails closed without an extra rule and
-   does not depend on pbr's `uplink_ip_rules_priority` ordering. The concrete
-   config lands in **setup.md Phase 7**; the leak self-test (NFR-O4) is in
-   **Phase 8.6** (see §13).
+   (`https-dns-proxy`) to the `wgvpn` interface (a hard device-bind /
+   `SO_BINDTODEVICE`-style `listen_dev`/egress-dev pin, **not** a mere
+   source-IP bind) so every router-originated upstream query egresses the
+   tunnel. dnsmasq forwards only to the local proxy (`127.0.0.1#5053`); the
+   proxy is the sole egress path.
+   **Two things this mechanism actually requires** — do not assume the bind
+   alone is sufficient:
+   - **Routing into the tunnel.** `https-dns-proxy` speaks DoH (TCP/443) to a
+     fixed upstream resolver IP. With `route_allowed_ips '0'` the `wgvpn`
+     interface installs **no** routes, so nothing sends that resolver IP into
+     the tunnel by default. The proxy's traffic reaches `wgvpn` only if the
+     device-bind forces egress out `wgvpn` (drops when the device is down) **or**
+     a route / pbr policy steers the upstream resolver IP into the `wgvpn`
+     table. Confirm one of these is in place — otherwise the proxy egresses a
+     WAN and DNS leaks even with the bind configured.
+   - **Fail-closed only under a hard device-bind.** "Cannot fall back to a WAN
+     when the tunnel is down" holds **only** if the bind is to the `wgvpn`
+     device itself (so the socket has no route when the device is gone). A
+     source-IP bind to `10.14.0.2` does **not** fail closed — the kernel may
+     still route via a WAN. Verify the bind type on hardware.
+   This is preferred over a pbr policy on the router's own port-53 egress
+   because — once the device-bind is correct — the forwarder fails closed
+   without depending on pbr's `uplink_ip_rules_priority` ordering.
+   **OFF-state caveat:** the tunnel-bound proxy fails closed only when it is
+   the active upstream. While the VPN is OFF (the default state), dnsmasq must
+   still resolve normally, so the toggle must point dnsmasq's upstream at a
+   non-tunnel forwarder when OFF and switch to the `wgvpn`-bound proxy when ON.
+   Pinning the proxy to `wgvpn` as the *sole* upstream unconditionally would
+   break DNS for everyone whenever the tunnel is down — including default-OFF —
+   which violates "VPN state never breaks adblock." The concrete config lands
+   in **setup.md Phase 7**; the leak self-test (NFR-O4) is in **Phase 8.6**
+   (see §13).
+   > **Status — designed here, implemented + leak-tested at deploy.** The
+   > mechanism above is the committed design, but setup.md Phase 7 does **not**
+   > yet ship the two concrete steps: (a) the `wgvpn` device-bind on
+   > `https-dns-proxy`, and (b) the toggle switching dnsmasq's upstream between a
+   > non-tunnel forwarder (OFF) and the `wgvpn`-bound proxy (ON). They are left
+   > to deploy on purpose — fail-closed DNS routing is order- and
+   > hardware-sensitive (device-bind vs source-bind, the OFF↔ON switch race, the
+   > endpoint-resolution bootstrap) and is best validated with a live DNS-leak
+   > test, not blind shell. **Known consequence until implemented:** with the
+   > VPN ON, the router's *own* upstream DNS egresses a WAN — content is still
+   > encrypted if DoH is on (the ISP sees only "talks to a DoH resolver"), but
+   > the queries do not ride the tunnel, so NFR-S2 ("DNS MUST egress the tunnel")
+   > is not yet met. Close it during the Phase 8.6 leak test. See §13.
 4. **Disable peerdns on the WANs** so the ISP-pushed resolver is never adopted
    as upstream.
 
@@ -373,10 +438,26 @@ instead of leaking it out a WAN. So if the tunnel dies, a client routed
 "via VPN" loses internet rather than silently falling back to the cleartext
 WAN.
 
-> **Honest limitation:** `strict_enforcement` only protects **forwarded LAN**
-> traffic. The router itself can still reach the internet directly — it is not
-> a router-egress kill switch. Router-originated traffic (including DNS, see §7)
-> must be steered separately.
+> **Honest limitation 1 — scope.** `strict_enforcement` only protects
+> **forwarded LAN** traffic. The router itself can still reach the internet
+> directly — it is not a router-egress kill switch. **All** router-originated
+> traffic — DNS (§7), `opkg`, NTP, the §6/healthcheck speed probes,
+> `https-dns-proxy`'s own DoH — egresses a WAN, not the tunnel, by design. Only
+> forwarded LAN matched by a pbr policy is policy-routed and kill-switched;
+> everything the router originates must be steered separately if it must not
+> leak (DNS is the one case handled, via §7 item 3).
+>
+> **Honest limitation 2 — no auto-heal (foot-gun).** The toggle gates pbr on a
+> fresh handshake (§6.1), but `strict_enforcement '1'` has **no watchdog**. If
+> the handshake succeeds and the tunnel then dies (peer drops, WAN path fails
+> mid-session before mwan3's `mwan3.user` flush re-handshakes, server goes
+> away), policy-matched clients are **black-holed** — they lose internet and
+> stay that way until a human runs `vpn-toggle off`. This is the intended
+> fail-closed behavior, but it is also a foot-gun: there is no automatic revert
+> to WAN and no auto-reconnect loop. A handshake-age watchdog (cron/procd that
+> runs `vpn-toggle off` if `wg` shows no handshake within N seconds) is a
+> recommended follow-up; until then a dead tunnel is a manual-recovery outage
+> for policied clients.
 
 Verify the kill-switch: enable a VPN policy for a test client, run an IP-leak
 test (`curl ifconfig.co` should show the Surfshark egress IP), then `ifdown
@@ -420,10 +501,34 @@ esac
 
 This flushes only the tunnel's UDP flow (not every connection), letting
 WireGuard re-handshake out the live WAN instead of black-holing on the dead one.
+A single failover often fires twice (e.g. `disconnected` of the dead WAN then
+`connected` of the survivor); the double flush is harmless because
+re-handshaking is idempotent.
+
+> **No toggle/flap race.** This hook shares no mutable state with the
+> `vpn-toggle` script (§6.1) except the kernel conntrack table: it never writes
+> UCI, never runs `ifup`/`ifdown`, never enables/disables pbr. The toggle gates
+> on `wg show … latest-handshakes` (kernel WireGuard state), not on conntrack.
+> So no interleaving of a WAN flap (this hook) with a concurrent or mid-flight
+> toggle can corrupt toggle state — the hook's worst case under any ordering is
+> one wasted, idempotent flush. (The real residual is the no-watchdog black-hole
+> in §9, which this hook does not cause; its flush is in fact the re-handshake
+> mechanism that *recovers* the tunnel after a flap.)
 
 > The WG **endpoint host route** must stay on the physical WAN. With pbr (not
 > `route_allowed_ips 1`) the tunnel's own endpoint is reached over the real
 > WAN, so the tunnel can connect — verify this after any routing change.
+>
+> **DNS bootstrap hazard:** `endpoint_host` is a *hostname*
+> (`xx-yyy.prod.surfshark.com`), resolved at `ifup` time. WireGuard caches the
+> resolved IP, so steady-state is fine. But if the endpoint ever needs
+> re-resolving while the tunnel is **down** *and* dnsmasq's upstream is the
+> `wgvpn`-bound (fail-closed) proxy, resolution deadlocks: you cannot resolve
+> the endpoint because the only DNS path needs the tunnel that needs the
+> endpoint. The toggle's OFF state pointing dnsmasq at a non-tunnel upstream
+> (§7 OFF-state caveat) is what breaks this loop — confirm the toggle restores
+> the non-tunnel upstream *before* attempting `ifup`/re-handshake, or pin
+> `endpoint_host` to a literal IP to sidestep re-resolution entirely.
 
 ---
 
@@ -465,14 +570,26 @@ two services clobber each other's connmarks.
   reduces but may not fully eliminate client encrypted-DNS bypass (apps with
   hardcoded DoH IPs). Confirm coverage against the specific client devices on
   the LAN; a stricter "reject all 443 to known DoH IPs" nftset may be needed.
-- **Router-egress DNS routing under VPN — RESOLVED.** Mechanism is chosen
-  (not deferred): bind `https-dns-proxy` to the `wgvpn` interface so the
-  router's *own* upstream DNS traverses the tunnel and fails closed when it is
-  down (§7 item 3). The pbr-policy-on-port-53 alternative is rejected. Config
-  lands in setup.md Phase 7; the DNS-leak self-test (NFR-O4) is added to
-  Phase 8.6 so the NFR-S2 Must requirement is verifiable on hardware rather
-  than deferred. Still confirm the egress resolver is Surfshark's (not the ISP)
-  via the live leak test when first brought up.
+- **Router-egress DNS routing under VPN — DESIGNED, NOT YET IMPLEMENTED.**
+  The *mechanism* is chosen (not deferred to a coin-flip): bind
+  `https-dns-proxy` to the `wgvpn` device so the router's *own* upstream DNS
+  egresses the tunnel and fails closed when it is down (§7 item 3), with the
+  toggle making this the *active* upstream only when the VPN is ON and
+  restoring a non-tunnel upstream when OFF (§7 OFF-state caveat). The
+  pbr-policy-on-port-53 alternative is rejected.
+  **Implement + verify at deploy (decision: doc now, test on hardware):**
+  setup.md Phase 7 as currently written does **not** implement either half —
+  there is no `wgvpn` device-bind on `https-dns-proxy` (5.5 leaves it on default
+  WAN DoH egress) and the toggle (7.7) never switches dnsmasq's upstream. The
+  known consequence until implemented: with the VPN ON, the router's upstream
+  DNS egresses a WAN (encrypted under DoH, but not tunnel-routed) — so NFR-S2 is
+  not yet met. This is deliberately deferred to deploy because fail-closed DNS
+  routing must be validated live, not written blind. Two prerequisites apply
+  when implementing: the bind must be a hard *device* bind to fail closed, and a
+  route/policy must steer the DoH resolver IP into `wgvpn` given
+  `route_allowed_ips '0'` (§7 item 3). The DNS-leak self-test (NFR-O4, Phase
+  8.6) is the gate that confirms closure — verify the egress resolver is
+  Surfshark's (not the ISP) on first bring-up.
 - **Surfshark MTU.** `1412` is a safe starting point; the optimal value depends
   on the active WAN's path MTU. Tune if bulk transfers still stall after
   `mtu_fix`.

@@ -9,20 +9,24 @@ DNS filtering and an on-demand Surfshark WireGuard VPN.
   Never commit real secrets (private keys, auth tokens) to git.
 - Most commands run **on the router** over SSH (`ssh root@192.168.1.1`) unless a step
   says "on your workstation".
-- The Pi 5 is **bcm27xx / bcm2712, aarch64 (ARMv8-A Cortex-A76)** — NOT ARMv7. Using an
-  armv7 / bcm2709 / bcm2710 image will not boot.
-- This build uses OpenWrt **fw4 (nftables)**, the default on 22.03+/23.05/24.10/25.12.
+- The Pi 5 is **bcm27xx / bcm2712, aarch64 (ARMv8-A Cortex-A76)**. Use only the
+  `bcm27xx/bcm2712` `rpi-5` aarch64 image; an image for a different Raspberry Pi target
+  will not boot.
+- This build uses OpenWrt **fw4 (nftables)**, the default since 22.03 (verify your exact
+  stable release against the live OpenWrt source).
 
 ### Topology used throughout
 
-| Role | NIC | Device (typical) | Notes |
-| --- | --- | --- | --- |
-| WAN1 | onboard GbE | `eth0` | RP1 dedicated lane, fastest path. Primary uplink. |
-| WAN2 | USB3 GbE adapter | `eth1` | Second uplink. Use a USB3 (blue) port. |
-| LAN | USB3 GbE adapter | `eth2` | To a downstream switch. Use a USB3 (blue) port. |
+| Role | NIC | Kernel name (pre-pin) | Pinned name (Phase 2.4) | Notes |
+| --- | --- | --- | --- | --- |
+| WAN1 | onboard GbE | `eth0` | `eth0` (not renamed) | RP1 dedicated lane, fastest path. Primary uplink. |
+| WAN2 | USB3 GbE adapter | `eth1` (typical) | `wan2dev` | Second uplink. Use a USB3 (blue) port. |
+| LAN | USB3 GbE adapter | `eth2` (typical) | `landev` | To a downstream switch. Use a USB3 (blue) port. |
 
-> Device names (`eth1`/`eth2`) are NOT guaranteed stable across reboots for USB NICs.
-> Phase 2 pins them by MAC so mwan3 member-to-WAN mapping never drifts.
+> The `eth1`/`eth2` kernel names are pre-pin and are NOT guaranteed stable across reboots
+> for USB NICs (enumeration order can swap) — do NOT hard-code them. Phase 2.4 pins each by
+> MAC so mwan3 member-to-WAN mapping never drifts. From Phase 2.4 on, the canonical names
+> are `wan2dev` / `landev`.
 
 ### Mark / priority allocation (so subsystems do not collide)
 
@@ -43,7 +47,9 @@ Use the current stable release, squashfs flavor, target `bcm27xx/bcm2712`, devic
 Optionally pre-bake packages via the [Firmware Selector](https://firmware-selector.openwrt.org/?target=bcm27xx%2Fbcm2712&id=rpi-5).
 
 ```bash
-# Replace <VER> with the current stable, e.g. 25.12.4
+# Replace <VER> with the current stable release for this target.
+# Do NOT trust a hard-coded version here — verify the current stable against the
+# live Firmware Selector / downloads.openwrt.org listing before downloading.
 VER="<VER>"
 BASE="https://downloads.openwrt.org/releases/${VER}/targets/bcm27xx/bcm2712"
 IMG="openwrt-${VER}-bcm27xx-bcm2712-rpi-5-squashfs-factory.img.gz"
@@ -65,14 +71,45 @@ Easiest: Raspberry Pi Imager → "Use custom" → select the `.img.gz`. Or via `
 
 ```bash
 gzip -dk "${IMG}"                       # -> openwrt-...-factory.img
-# VERIFY the target device first! Wrong device = data loss.
-lsblk
-sudo dd if=openwrt-${VER}-bcm27xx-bcm2712-rpi-5-squashfs-factory.img \
-        of=/dev/<DISK> bs=2M conv=fsync status=progress
-sync
 ```
 
-**Expected:** `dd` reports bytes written; `sync` returns cleanly.
+> **DANGER — wrong-disk destruction.** `dd` will overwrite whatever device you point it at,
+> including your workstation's own system disk, with NO confirmation and NO undo. You MUST
+> positively identify the removable boot media before writing. Do not copy/paste the `dd`
+> line until you have confirmed `<DISK>` is correct.
+
+```bash
+# 1. List block devices and pick the target. The boot media should match its known SIZE,
+#    show MODEL = your SD/SSD/NVMe, and (for USB/SD) RM=1 (removable) / TRAN=usb|nvme.
+lsblk -d -o NAME,SIZE,MODEL,TRAN,RM,MOUNTPOINTS
+
+# 2. Set DISK to JUST the device name (e.g. sdb, mmcblk0, nvme0n1) — never a partition.
+DISK="<DISK>"
+
+# 3. CONFIRM: inspect the exact device you are about to erase. Verify SIZE/MODEL/TRAN match
+#    the removable media and that it is NOT your root/system disk (MOUNTPOINTS should not
+#    include '/' or '/boot'). If anything looks wrong, STOP.
+lsblk -d -o NAME,SIZE,MODEL,TRAN,RM,MOUNTPOINTS "/dev/${DISK}"
+
+# 4. Gated flash: the dd only runs if DISK was actually replaced AND the device is not the
+#    running root disk. Otherwise it refuses and does nothing. (Re-read step 3's output and
+#    your own eyes are still the real safety check — this gate only blocks two obvious foot-guns.)
+if [ "$DISK" = "<DISK>" ]; then
+    echo "REFUSING: replace <DISK> with the real device name first."
+elif [ ! -b "/dev/${DISK}" ]; then
+    echo "REFUSING: /dev/${DISK} is not a block device."
+elif findmnt -n -o SOURCE / | grep -q "/dev/${DISK}"; then
+    echo "REFUSING: /dev/${DISK} hosts the running root filesystem."
+else
+    sudo dd if=openwrt-${VER}-bcm27xx-bcm2712-rpi-5-squashfs-factory.img \
+            of="/dev/${DISK}" bs=2M conv=fsync status=progress
+    sync
+fi
+```
+
+**Expected:** step 3 shows your removable media (correct size/model, not the root disk);
+the gate in step 4 prints no "REFUSING" line, runs `dd` (bytes written), and `sync` returns
+cleanly. Any "REFUSING:" line means nothing was written — fix `DISK` and retry.
 
 ### 1.3 First boot
 
@@ -130,7 +167,12 @@ uci commit network
 
 **Expected:** `ip addr show eth0` shows a DHCP-assigned address; `ping -c2 1.1.1.1` works.
 
-> This is a temporary bootstrap. Phase 3 restores the final topology.
+> **Lock-out warning:** you are connected to the Pi over the onboard `eth0` (Phase 1.3).
+> This step frees `eth0` from LAN and turns it into a DHCP WAN client, so `/etc/init.d/network
+> restart` **will drop your SSH/management connection on `eth0`** and you will not get it back
+> on that port. Do this step from a keyboard+monitor or serial console, OR be ready to
+> reconnect via the USB LAN NIC (`landev`) once Phase 3 brings it up. This is a temporary
+> bootstrap; Phase 3 restores the final topology.
 
 ### 2.2 Install USB-Ethernet kmod drivers
 
@@ -180,11 +222,10 @@ Pin a stable name to each MAC so mwan3 members never track the wrong uplink.
 
 ```bash
 # Replace each <MAC_*> with the real address from step 2.3.
-# This renames the physical devices to stable aliases at boot.
-cat > /etc/config/wan_pin <<'EOF'
-EOF
-
-# Use named device sections in /etc/config/network pinned to MAC.
+# Named 'device' sections in /etc/config/network pin a stable alias name to each MAC,
+# so the kernel's eth1/eth2 enumeration order can swap on reboot without breaking config.
+# Note: the onboard NIC is intentionally NOT renamed — it stays 'eth0' (a fixed PCIe/RP1
+# device, not subject to USB re-enumeration), so only the two USB NICs are pinned here.
 uci set network.dev_wan2='device'
 uci set network.dev_wan2.name='wan2dev'
 uci set network.dev_wan2.macaddr='<MAC_WAN2>'
@@ -221,6 +262,12 @@ ip link show landev    # exists, MAC matches <MAC_LAN>
 
 ### 3.1 Define the final interfaces
 
+> **Lock-out warning:** this step moves the LAN off the onboard `eth0` (where your
+> workstation has been plugged in for Phases 1-2) onto the USB NIC `landev`, and turns
+> `eth0` into WAN1. After `/etc/init.d/network restart` you **lose management connectivity
+> on `eth0`**. Before running this block, move your workstation cable to `landev` (or a
+> switch hanging off it), or drive this step from a keyboard+monitor / serial console.
+
 ```bash
 # LAN: the USB NIC to your switch.
 uci set network.lan='interface'
@@ -251,6 +298,11 @@ uci commit network
 ### 3.2 Firewall zones (one WAN-type zone per uplink)
 
 ```bash
+# CONFIRM @zone[1] is actually the 'wan' zone before editing it. On a fresh OpenWrt the
+# convention is @zone[0]=lan, @zone[1]=wan, but the index is NOT guaranteed — editing the
+# wrong zone breaks NAT. If this does not print 'wan', adjust the index in the lines below.
+uci show firewall.@zone[1].name   # expect: firewall.cfg...='wan'
+
 # wan zone covers both physical WANs; masq + MSS clamp.
 uci set firewall.@zone[1].network='wan wanb'   # @zone[1] is the default 'wan' zone
 uci set firewall.@zone[1].masq='1'
@@ -270,11 +322,32 @@ nft list ruleset | grep -iE 'masquerade|oifname'   # NAT present on wan devices
 dnsmasq is preinstalled. Adblock (Phase 5) plugs into it. For VPN domain policies later,
 swap stock dnsmasq for `dnsmasq-full` now to avoid a reinstall:
 
+`dnsmasq-full` conflicts with stock `dnsmasq`: both provide `/etc/init.d/dnsmasq` and the
+`dnsmasq` virtual, so `opkg install dnsmasq-full` on its own ABORTS with a file/dependency
+conflict — opkg does NOT silently remove the stock package for you. You must remove stock
+dnsmasq first, in the same shell, so DNS is only briefly absent. Download the replacement
+before removing, so a download failure does not strand you with no resolver at all. You can
+skip this swap if you will not use domain-based VPN policies (Phase 7), but doing it now
+avoids a later reinstall.
+
 ```bash
 opkg update
-opkg install dnsmasq-full      # conflicts with dnsmasq; opkg handles the swap. Skip if domain-based VPN policies are not needed.
+# Pre-download dnsmasq-full so we don't remove the working resolver before we have its
+# replacement on disk.
+opkg download dnsmasq-full
+# Remove stock dnsmasq, then install the cached full build. --cache reuses the file just
+# downloaded so this works even with no internet mid-swap.
+opkg remove dnsmasq
+opkg install --cache . dnsmasq-full
 /etc/init.d/dnsmasq restart
 ```
+
+> **Verify the swap took** — if the install conflicted and you are still on stock dnsmasq,
+> the domain-policy features Phase 7 relies on are absent and will fail there, not here:
+>
+> ```bash
+> opkg list-installed | grep -E '^dnsmasq'   # expect: dnsmasq-full ... (NOT plain dnsmasq)
+> ```
 
 **Verify:**
 
@@ -324,13 +397,25 @@ mwan3 status      # runs; interfaces listed (may be offline until configured)
 uci set mwan3.globals.mmx_mask='0x3F00'
 
 # --- interface tracking (liveness/failover; this owns up/down, NOT the speed test) ---
+# Use DISTINCT anycast track_ip per WAN. If both WANs shared the same two IPs, a single
+# global anycast outage (e.g. 8.8.8.8) would drop one probe on EACH WAN and, with
+# reliability=2, mark BOTH down at once. Distinct targets keep the links independent.
+# (Matches load-balancing.md §3.1.)
+uci set mwan3.wan='interface'
+uci set mwan3.wan.enabled='1'
+uci set mwan3.wan.family='ipv4'
+uci delete mwan3.wan.track_ip 2>/dev/null
+uci add_list mwan3.wan.track_ip='1.1.1.1'      # Cloudflare anycast
+uci add_list mwan3.wan.track_ip='8.8.8.8'      # Google anycast
+
+uci set mwan3.wanb='interface'
+uci set mwan3.wanb.enabled='1'
+uci set mwan3.wanb.family='ipv4'
+uci delete mwan3.wanb.track_ip 2>/dev/null
+uci add_list mwan3.wanb.track_ip='9.9.9.9'     # Quad9 anycast
+uci add_list mwan3.wanb.track_ip='8.8.4.4'     # Google anycast (secondary)
+
 for IF in wan wanb; do
-  uci set mwan3.$IF='interface'
-  uci set mwan3.$IF.enabled='1'
-  uci set mwan3.$IF.family='ipv4'
-  uci delete mwan3.$IF.track_ip 2>/dev/null
-  uci add_list mwan3.$IF.track_ip='1.1.1.1'
-  uci add_list mwan3.$IF.track_ip='8.8.8.8'
   uci set mwan3.$IF.track_method='ping'
   uci set mwan3.$IF.reliability='2'     # <= number of track_ip entries, else IF never comes up
   uci set mwan3.$IF.count='1'
@@ -416,13 +501,20 @@ uci set adblock.global.adb_enabled='1'
 uci set adblock.global.adb_dns='dnsmasq'
 
 # Feed layering: breadth (hagezi Pro + oisd) + active threat intel (tif/certpl/urlhaus).
-# Enable feeds (exact source names live in /etc/adblock/adblock.feeds; enable via LuCI or UCI).
-# Recommended set:
+# Recommended set (breadth + threat intel):
 #   hagezi Pro (or Pro++)  - ads/trackers/telemetry
 #   oisd Big               - low-false-positive baseline
 #   hagezi TIF (or Medium) - malware/phishing threat intel
 #   certpl                 - default threat feed
 #   urlhaus                - active malware domains (needs abuse.ch Auth-Key, see note)
+#
+# Enable feeds by adding each to adb_feed. The names below are PLACEHOLDERS — the exact
+# source names live in /etc/adblock/adblock.feeds and vary by adblock version. List the
+# real names with:  jsonfilter -i /etc/adblock/adblock.feeds -e '@.*~' 2>/dev/null
+# (or browse them in LuCI: Services -> Adblock), then substitute them below.
+FEEDS="hagezi_pro oisd_big hagezi_tif certpl urlhaus"   # <- verify each name first
+uci -q delete adblock.global.adb_feed
+for f in $FEEDS; do uci add_list adblock.global.adb_feed="$f"; done
 uci commit adblock
 ```
 
@@ -446,9 +538,13 @@ uci commit adblock
 ```bash
 # Force all LAN port-53 queries to the router resolver (nftables DNAT) so clients
 # can't hard-code 8.8.8.8 and skip filtering.
+# adb_nftforce is the force-DNS toggle in current adblock; if your version ignores it the
+# DNAT redirect below will be absent — the verify step catches a silently-ignored option.
 uci set adblock.global.adb_nftforce='1'
 uci commit adblock
 /etc/init.d/adblock restart
+# Confirm force-DNS actually installed a port-53 redirect/DNAT rule:
+nft list ruleset | grep -iE 'redirect|dnat' | grep -E '(:| )53( |$|,)'   # expect a match
 
 # Block DNS-over-TLS (port 853) so devices can't use encrypted DNS to bypass adblock.
 # Omit a single-zone 'dest' so the REJECT applies regardless of which WAN the flow takes.
@@ -478,18 +574,32 @@ uci commit firewall
 
 ```bash
 opkg install https-dns-proxy        # DoH forwarder (Cloudflare/Quad9 by default)
-# Point dnsmasq upstream at the local DoH proxy:
+/etc/init.d/https-dns-proxy restart
+
+# VERIFY the proxy is actually listening before you cut dnsmasq over to it — otherwise
+# noresolv='1' with a single unreachable upstream breaks ALL DNS. The port below (5053)
+# must match https-dns-proxy's configured listen_port; the first instance defaults to 5053
+# but confirm it.
+netstat -ltnp 2>/dev/null | grep 5053    # expect https-dns-proxy listening on 127.0.0.1:5053
+# (no netstat? use: ss -ltnp | grep 5053)
+
+# Only after the proxy is confirmed up, point dnsmasq upstream at the local DoH proxy:
 uci set dhcp.@dnsmasq[0].noresolv='1'
 uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5053'
 uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```
 
+**Verify:** `nslookup openwrt.org 127.0.0.1` still resolves (DNS now flows through the
+DoH proxy). If it fails, revert `noresolv` and re-check the proxy port.
+
 ### 5.6 Daily feed refresh
 
 ```bash
 # 'reload' (not restart) actually re-downloads.
-echo '0 5 * * * /etc/init.d/adblock reload' >> /etc/crontabs/root
+# Guard against duplicate lines if you re-run this step (the append is not idempotent).
+grep -q '/etc/init.d/adblock reload' /etc/crontabs/root || \
+  echo '0 5 * * * /etc/init.d/adblock reload' >> /etc/crontabs/root
 /etc/init.d/cron enable
 /etc/init.d/cron restart
 ```
@@ -512,7 +622,14 @@ up/down — that would create two sources of truth fighting each other.
 
 **The whole game is binding the probe to the correct WAN.** With mwan3 active there is a
 load-balanced default route; an unbound probe measures "whatever WAN got picked" and
-corrupts both weights. We bind by source IP and **verify** the IP actually used.
+corrupts both weights. We bind via **`mwan3 use <iface>`**, which runs the probe inside
+that WAN's routing table — a real egress guarantee. A bare `--source <WAN_IP>` is **not**
+sufficient: it sets only the socket source address while the kernel still picks egress via
+the load-balanced default route, so the probe can leave the wrong WAN while carrying the
+right IP. (See `load-balancing.md` §5.1 for why `--source` plus a "verify the source IP"
+check is circular.) An independent device-bound `curl --interface 'if!<dev>'` cross-check
+of `%{local_ip}` confirms netifd's device↔IP mapping, but the egress guarantee itself comes
+from `mwan3 use`.
 
 ### 6.1 Install the probe
 
@@ -523,6 +640,12 @@ opkg install librespeed-cli jsonfilter
 # opkg install curl
 ```
 
+> **Verify flag names.** The healthcheck script below assumes `librespeed-cli` accepts
+> `--no-upload`, `--duration`, `--concurrent`, and `--json` (the probe is bound via
+> `mwan3 use`, so `--source` is not needed). Flag spellings have varied across builds — run
+> `librespeed-cli --help` and reconcile the script's flags before trusting it, or the probe
+> fails silently (caught by `|| true`) and weights never update.
+
 ### 6.2 The healthcheck script
 
 ```bash
@@ -530,13 +653,20 @@ cat > /usr/bin/wan-weight.sh <<'EOF'
 #!/bin/sh
 # wan-weight.sh - per-WAN capacity probe -> mwan3 member weight.
 # Liveness/failover is owned by mwan3track; this script only adjusts weights.
-# Binding the probe to the correct WAN source IP is mandatory; an unbound probe
-# silently measures the load-balanced default route and corrupts the weights.
+# Binding the probe to the correct WAN is mandatory; an unbound probe silently
+# measures the load-balanced default route and corrupts the weights. We bind via
+# `mwan3 use <iface>` (runs the probe inside that WAN's routing table = real egress
+# guarantee). A bare `--source <ip>` is NOT sufficient (see load-balancing.md §5.1).
 
 set -eu
+# set -e is intentionally paired with '|| true' on every probe/parse/grep below so that
+# a failure on one WAN (probe timeout, unparseable JSON) does not abort the loop and leave
+# the other WAN unweighted. Do not remove the guards.
 
 LOG_TAG="wan-weight"
-STATE_DIR="/tmp/wan-weight"
+# Persist EWMA state under /etc (survives reboot), NOT /tmp (tmpfs, wiped on reboot).
+# A wiped state file is non-fatal: the first run after reboot reseeds from the raw sample.
+STATE_DIR="/etc/wan-weight"
 mkdir -p "$STATE_DIR"
 
 # WAN interface (netifd name) -> mwan3 member section name.
@@ -556,12 +686,15 @@ for pair in $WAN_MEMBERS; do
     member="${pair##*:}"
 
     # Skip a WAN that mwan3 already reports down; do not probe a dead link.
-    if ! mwan3 interfaces 2>/dev/null | grep -A1 -iE "interface ${wan_if} " | grep -qi "is online"; then
+    # mwan3 prints status on ONE line ("interface wan is online ..."), so match it on a
+    # single line — an -A1 multi-line match grabs the wrong (next) line and falsely skips.
+    if ! mwan3 interfaces 2>/dev/null | grep -qiE "interface ${wan_if} is online"; then
         logger -t "$LOG_TAG" "skip ${wan_if}: not online per mwan3"
         continue
     fi
 
-    # Resolve this WAN's source IP from netifd.
+    # Resolve this WAN's source IP from netifd (for logging + the device/IP cross-check;
+    # NOT used to bind the probe — `mwan3 use` does the binding).
     src_ip="$(ubus call network.interface.${wan_if} status 2>/dev/null \
               | jsonfilter -e '@["ipv4-address"][0].address' || true)"
     if [ -z "$src_ip" ]; then
@@ -569,8 +702,10 @@ for pair in $WAN_MEMBERS; do
         continue
     fi
 
-    # Bound capacity probe. --source binds to the WAN's IP; download-only; short burst.
-    json="$(librespeed-cli --source "$src_ip" --no-upload \
+    # Bound capacity probe. `mwan3 use <iface>` runs librespeed inside this WAN's routing
+    # table = real egress guarantee. Do NOT use bare `--source` (sets source addr only,
+    # can egress the wrong WAN — see load-balancing.md §5.1). Download-only; short burst.
+    json="$(mwan3 use "$wan_if" librespeed-cli --no-upload \
              --duration "$PROBE_DURATION" --concurrent "$PROBE_CONCURRENT" \
              --json 2>/dev/null || true)"
     if [ -z "$json" ]; then
@@ -597,7 +732,7 @@ for pair in $WAN_MEMBERS; do
     new="$(awk -v o="$old" -v n="$meas" -v ao="$EWMA_ALPHA_OLD" -v an="$EWMA_ALPHA_NEW" \
            'BEGIN{printf "%d", (o*ao + n*an)/100 + 0.5}')"
     [ "$new" -lt 1 ] && new=1
-    [ "$new" -gt 1000 ] && new=1000   # mwan3 caps weight at 1000
+    [ "$new" -gt 1000 ] && new=1000   # self-imposed clamp; mwan3 documents no hard max
 
     cur="$(uci -q get mwan3.${member}.weight || echo 1)"
 
@@ -627,12 +762,16 @@ chmod +x /usr/bin/wan-weight.sh
 ### 6.3 Verify binding works (run once, by hand)
 
 ```bash
-# Confirm a bound probe really uses the intended WAN source IP before trusting it.
+# Confirm a probe bound via `mwan3 use` really egresses the intended WAN before trusting it.
 WAN_IF=wan
 SRC="$(ubus call network.interface.${WAN_IF} status | jsonfilter -e '@["ipv4-address"][0].address')"
-echo "wan src ip = $SRC"
-# If you installed curl, prove the source IP used matches:
-# curl --silent --source "$SRC" -o /dev/null -w 'used %{local_ip}\n' https://speed.cloudflare.com/__down?bytes=10000000
+DEV="$(ubus call network.interface.${WAN_IF} status | jsonfilter -e '@.l3_device')"
+echo "wan src ip = $SRC ; l3 device = $DEV"
+# Independent device-bound cross-check (needs curl): the local IP curl reports for a
+# device bind must equal this WAN's IP. A device bind ('if!<dev>') forces egress out the
+# NIC; a bare --source does NOT and cannot be used for this check.
+# curl --silent --interface "if!$DEV" -o /dev/null -w 'egress local_ip %{local_ip}\n' \
+#      https://speed.cloudflare.com/__down?bytes=10000000   # expect: == $SRC
 
 /usr/bin/wan-weight.sh
 logread | grep wan-weight | tail
@@ -644,7 +783,9 @@ IP printed matches that WAN's IP. `mwan3 policies` reflects the new split if wei
 ### 6.4 Schedule (every 30 min)
 
 ```bash
-echo '*/30 * * * * /usr/bin/wan-weight.sh' >> /etc/crontabs/root
+# Guard against duplicate lines if you re-run this step (the append is not idempotent).
+grep -q '/usr/bin/wan-weight.sh' /etc/crontabs/root || \
+  echo '*/30 * * * * /usr/bin/wan-weight.sh' >> /etc/crontabs/root
 /etc/init.d/cron restart
 ```
 
@@ -654,7 +795,8 @@ half-hour, `logread | grep wan-weight` shows a fresh run.
 > **Data burn:** a librespeed run can move hundreds of MB per WAN. 30 min balances
 > freshness vs. data. For a metered uplink, stretch to 2-4h or downgrade that WAN to a
 > small curl `--limit-rate` byte-count probe only. **Never** probe through the WireGuard
-> tunnel by accident — bind to the physical WAN IP, not `wg0`.
+> tunnel by accident — bind to the physical WAN via `mwan3 use wan`/`mwan3 use wanb`, not
+> `wgvpn`.
 
 ---
 
@@ -683,7 +825,9 @@ pair (private key stays local) and download a per-server `.conf`. You will need:
 - `<WG_PEER_PUBLIC_KEY>` — the server's public key.
 - `<WG_ENDPOINT_HOST>` — e.g. `xx-yyy.prod.surfshark.com`.
 - Endpoint port is `51820`. Surfshark issues **no** preshared key.
-- Surfshark DNS: `162.252.172.57` and `149.154.159.92`.
+- Surfshark DNS — use the values from your downloaded `.conf` / the Surfshark dashboard.
+  At time of writing these were `162.252.172.57` and `149.154.159.92`, but treat them as
+  examples and verify the current values rather than hard-coding these.
 
 ### 7.3 Configure the wg interface (split-tunnel model: route_allowed_ips 0)
 
@@ -768,7 +912,11 @@ uci set pbr.@policy[-1].interface='wgvpn'
 uci set pbr.@policy[-1].enabled='0'                  # OFF by default
 
 uci commit pbr
-/etc/init.d/pbr stop      # default state: VPN off, pbr not steering anything
+/etc/init.d/pbr stop        # stop the running service now
+/etc/init.d/pbr disable     # belt-and-suspenders: keep it from starting on boot
+# Note: the actual OFF-by-default guarantee is pbr.config.enabled='0' plus the per-policy
+# enabled='0' above; 'disable' just ensures the init script does not start a steering
+# service on reboot. The toggle script (7.7) re-enables the service when VPN is turned on.
 ```
 
 **Verify (mark/priority do not collide with mwan3):**
@@ -787,7 +935,7 @@ mwan3 failover. Flush only the wg endpoint flow on transitions so it re-handshak
 the surviving WAN.
 
 ```bash
-opkg install conntrack
+opkg install conntrack-tools     # provides the `conntrack` CLI used below
 cat > /etc/mwan3.user <<'EOF'
 # Flush the WireGuard endpoint conntrack on a WAN transition so the tunnel
 # re-handshakes over the surviving WAN. Do NOT flush all conntrack (strands downloads).
@@ -798,10 +946,26 @@ cat > /etc/mwan3.user <<'EOF'
 #   connected    - link came back; re-pin the endpoint flow to the now-active WAN.
 case "$ACTION" in
     ifdown|disconnected|connected)
+        # Flush both directions of the WG endpoint flow (dport for outbound, sport
+        # for the NAT reply side) so the re-handshake is forced regardless of which
+        # half conntrack indexed — matches vpn.md §10. Both -D calls are idempotent:
+        # deleting an absent flow is a harmless no-op.
         conntrack -D -p udp --dport 51820 2>/dev/null || true
+        conntrack -D -p udp --sport 51820 2>/dev/null || true
         ;;
 esac
 EOF
+```
+
+> mwan3 sources `/etc/mwan3.user` on the next interface event, so no restart is strictly
+> required; running `mwan3 restart` reloads it immediately.
+
+**Verify:** trigger a transition and confirm the wg endpoint flow is flushed:
+
+```bash
+mwan3 ifdown wanb && mwan3 ifup wanb
+logread | grep -iE 'mwan3|wan-weight' | tail
+conntrack -L -p udp --dport 51820 2>/dev/null   # the old endpoint flow should be gone/re-created
 ```
 
 ### 7.7 On-demand toggle script
@@ -810,8 +974,10 @@ EOF
 cat > /usr/bin/vpn-toggle.sh <<'EOF'
 #!/bin/sh
 # vpn-toggle.sh on|off|status - on-demand Surfshark WireGuard toggle.
-# ON  : enable iface, ifup, wait for handshake, enable pbr policy, reload pbr.
-# OFF : disable pbr policy, reload/stop pbr, ifdown, disable iface.
+# ON  : enable iface, ifup, wait for handshake; ONLY if the handshake succeeds, enable the
+#       pbr policy and reload pbr. A dead tunnel must NOT enable pbr (strict_enforcement=1
+#       would kill-switch the policied LAN with no egress).
+# OFF : disable pbr policy + config, reload pbr, ifdown wgvpn, disable iface, stop pbr.
 # Order matters: tunnel must be UP before pbr reload so pbr sees the live interface.
 
 set -eu
@@ -834,11 +1000,33 @@ case "${1:-status}" in
         uci set network.wgvpn.disabled='0'; uci commit network
         ifup wgvpn
         # Wait up to 15s for a handshake.
+        # NOTE: do NOT use `awk '{exit ($2>0)?0:1}'` here. awk's `exit` fires on the FIRST
+        # line, and on EMPTY input (interface never came up -> no peer lines) awk runs no
+        # block and exits 0 == "success" -> a dead tunnel falsely reports handshaken, then
+        # pbr gets enabled and strict_enforcement=1 black-holes the LAN. Instead require at
+        # least one peer line whose handshake epoch is RECENT (within 180s of now), via an
+        # explicit count. The freshness window rejects a stale prior-session timestamp that
+        # would otherwise pass a bare `$2 > 0` after an OFF->ON cycle (matches vpn.md §6.1).
+        handshook=0
         n=0
         while [ $n -lt 15 ]; do
-            wg show wgvpn latest-handshakes 2>/dev/null | awk '{exit ($2>0)?0:1}' && break
+            now="$(date +%s)"
+            hs="$(wg show wgvpn latest-handshakes 2>/dev/null \
+                  | awk -v now="$now" '$2 > 0 && (now - $2) < 180 {c++} END{print c+0}')"
+            if [ "${hs:-0}" -gt 0 ]; then
+                handshook=1; break
+            fi
             n=$((n+1)); sleep 1
         done
+        # SAFETY: if no handshake, do NOT enable pbr. With strict_enforcement=1 a dead tunnel
+        # would black-hole the policied LAN. Back out the iface and leave VPN OFF instead.
+        if [ "$handshook" != "1" ]; then
+            logger -t vpn-toggle "VPN ON FAILED: no handshake in 15s; leaving VPN off"
+            ifdown wgvpn 2>/dev/null || true
+            uci set network.wgvpn.disabled='1'; uci commit network
+            echo "VPN handshake failed; VPN left OFF (LAN egress unaffected)." >&2
+            exit 1
+        fi
         # Single authority for the OFF-by-default invariant: flip BOTH the config-level
         # enable and the per-policy enable together (7.5 ships both as '0').
         uci set pbr.config.enabled='1'
@@ -918,7 +1106,7 @@ mwan3 interfaces        # wan + wanb online
 mwan3 policies          # balanced split reflects current weights
 # Per-flow stickiness check: two simultaneous large downloads should each pin to one WAN.
 # Inspect conntrack marks:
-conntrack -L 2>/dev/null | head
+conntrack -L 2>/dev/null | head   # requires conntrack-tools (installed in Phase 7.6)
 # Failover: unplug WAN1's uplink, confirm flows survive on wanb within ~30s:
 mwan3 interfaces        # wan -> offline, wanb still online; re-plug to recover
 ```
@@ -954,7 +1142,11 @@ wg show wgvpn                                  # down; dual-WAN balancing resume
 
 ```bash
 reboot
-# After it comes back:
+```
+
+Wait for the Pi to finish rebooting and re-establish SSH, then run:
+
+```bash
 ip link show wan2dev; ip link show landev      # pinned names survive
 mwan3 interfaces                               # both WANs online
 /etc/init.d/adblock status                     # adblock running
