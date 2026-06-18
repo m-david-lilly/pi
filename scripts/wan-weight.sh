@@ -35,7 +35,7 @@ readonly LOCK_FILE="/var/lock/wan-weight.lock"
 
 # logical mwan3 interface : member section name.
 # Edit if you renamed members in setup.md Phase 4.
-readonly WAN_MEMBERS="wan:wan_m1_w1 wanb:wanb_m1_w1"
+readonly WAN_MEMBERS="wan1:wan1_m1_w3 wan2:wan2_m1_w3"
 
 readonly EWMA_ALPHA_NEW=40      # integer percent weight of the new sample (0.4)
 readonly EWMA_ALPHA_OLD=60      # integer percent weight of the prior value (0.6)
