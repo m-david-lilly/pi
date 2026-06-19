@@ -151,6 +151,7 @@ fi
 
 # --- Pass 2: map each live WAN's EWMA to a weight proportional to the peak. ---
 changed=0
+changed_ifaces=""
 for entry in ${live}; do
     wan_if="${entry%%:*}"
     rest="${entry#*:}"
@@ -169,6 +170,10 @@ for entry in ${live}; do
     if [ "${delta_pct}" -ge "${REWEIGHT_THRESHOLD}" ]; then
         uci set "mwan3.${member}.weight=${new_w}"
         changed=1
+        # Record the logical WAN interface (not the member) — the reapply step
+        # below cycles each changed interface with `mwan3 ifup`, which is keyed
+        # on the interface name. De-dup is unnecessary: one member per WAN here.
+        changed_ifaces="${changed_ifaces} ${wan_if}"
         logger -t "${LOG_TAG}" \
             "${wan_if}/${member}: weight ${cur_w} -> ${new_w} (ewma=${ewma}Mbps peak=${peak}Mbps) APPLIED"
     else
@@ -179,16 +184,35 @@ done
 
 if [ "${changed}" = 1 ]; then
     uci commit mwan3
-    # Reapply WITHOUT `mwan3 restart`: FR-H13 forbids a full restart for a weight
-    # change because it tears down every ip rule including the tunnel's WAN pin,
-    # blipping the VPN. `mwan3 ifdown/ifup` (FR-H9's literal suggestion) is also
-    # unsuitable here — our mwan3 config sets `flush_conntrack` on ifdown, so
-    # cycling an interface for a mere weight change would strand that WAN's
-    # in-flight flows. `mwan3 reload` re-reads config and re-applies rules with
-    # neither a full teardown nor a tracking transition (no conntrack flush),
-    # satisfying FR-H13's MUST-NOT. Verify on the installed build that `reload`
-    # re-evaluates member weights (`mwan3 reload; mwan3 policies`); if it does
-    # not, fall back to per-changed-interface ifdown/ifup.
-    mwan3 reload
-    logger -t "${LOG_TAG}" "weights committed; mwan3 reloaded"
+    # Reapply per changed interface via `mwan3 ifup` (FR-H9's literal suggestion).
+    #
+    # NOT `mwan3 restart`: FR-H13 forbids a full restart for a weight change
+    # because it tears down every ip rule including the tunnel's WAN pin,
+    # blipping the VPN.
+    #
+    # NOT `mwan3 reload`: VERIFIED on the installed build (mwan3 2.12.0,
+    # 2026-06-19) that `mwan3 reload` does NOT re-evaluate member weights — the
+    # balanced policy split stays at its old ratio after a weight change + reload,
+    # and only updates on a full `restart` or a per-interface `ifup`. So `reload`
+    # silently commits weights that never reach the live traffic split. `mwan3
+    # ifup <iface>` DOES re-read the member weight and rebuild that interface's
+    # policy share without touching the other WAN's ip rules (verified: weight
+    # 1000/397 -> set wan2=1000 -> `ifup wan2` -> split moved 71/28 -> 50/50).
+    #
+    # Cost: our mwan3 config sets `flush_conntrack` on ifdown/disconnected, and
+    # `mwan3 ifup` of an already-up interface cycles it, so this flushes that
+    # WAN's conntrack — in-flight flows on the reweighted WAN reset. That is the
+    # accepted tradeoff for a real (not phantom) reweight; the REWEIGHT_THRESHOLD
+    # gate keeps it to genuinely material capacity changes, not every probe.
+    # Guard each ifup with `|| logger` (matching the probe-step pattern): `mwan3
+    # ifup` can return non-zero on benign RTNETLINK "File exists" route noise or a
+    # WAN that flapped between pass 1 and here. Under `set -eu` an unguarded
+    # failure would abort the loop, skip the remaining interface, AND skip the
+    # summary log — re-creating the very phantom-reweight this fix removes. The
+    # guard keeps set -e happy, surfaces the failure, and lets the loop finish.
+    for wan_if in ${changed_ifaces}; do
+        mwan3 ifup "${wan_if}" || \
+            logger -t "${LOG_TAG}" "WARN: mwan3 ifup ${wan_if} returned non-zero; weight committed, live reapply for ${wan_if} may be incomplete"
+    done
+    logger -t "${LOG_TAG}" "weights committed; reapplied via ifup:${changed_ifaces}"
 fi

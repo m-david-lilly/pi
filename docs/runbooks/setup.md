@@ -743,16 +743,34 @@ from `mwan3 use`.
 
 ```bash
 apk update
-apk add librespeed-cli jsonfilter
+apk add librespeed-cli jsonfilter coreutils-timeout
 # curl is an optional lighter fallback:
 # apk add curl
 ```
+
+> **`coreutils-timeout` is REQUIRED (verified on hardware, 2026-06-19).** This image's
+> busybox does NOT include the `timeout` applet (`timeout: applet not found`), and
+> wan-weight.sh wraps every probe in `timeout <n> mwan3 use ...` so a hung probe can't
+> stall the cron. Without the applet, EVERY probe command fails to launch, the script logs
+> "no usable probe / weights unchanged" forever, and capacity weighting never happens — a
+> silent no-op that looks healthy. `apk add coreutils-timeout` installs it as
+> `/usr/bin/timeout`.
 
 > **Verify flag names.** The healthcheck script below assumes `librespeed-cli` accepts
 > `--no-upload`, `--duration`, `--concurrent`, and `--json` (the probe is bound via
 > `mwan3 use`, so `--source` is not needed). Flag spellings have varied across builds — run
 > `librespeed-cli --help` and reconcile the script's flags before trusting it, or the probe
 > fails silently (caught by `|| true`) and weights never update.
+
+> **Reapply weights with `mwan3 ifup <iface>`, NOT `mwan3 reload` (verified on mwan3
+> 2.12.0, 2026-06-19).** `mwan3 reload` does **not** re-evaluate member weights — after a
+> weight change + reload the balanced policy split stays at its old ratio; only a full
+> `restart` (forbidden by FR-H13 — blips the VPN WAN pin) or a per-interface `mwan3 ifup`
+> picks up the new weight. wan-weight.sh therefore cycles each changed interface via
+> `mwan3 ifup`. Tradeoff: our mwan3 config flushes that WAN's conntrack on the implied
+> ifdown, so a genuine reweight resets in-flight flows on the reweighted WAN — gated by
+> REWEIGHT_THRESHOLD so it only fires on material capacity changes. Verified: weights
+> 1000/500 → script run → live split moved 50/50 → 66/33.
 
 ### 6.2 The healthcheck script
 
