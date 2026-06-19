@@ -1,0 +1,18 @@
+
+config system
+	option hostname 'OpenWrt'
+	option timezone 'GMT0'
+	option zonename 'UTC'
+	option ttylogin '0'
+	option log_size '128'
+	option urandom_seed '0'
+
+config timeserver 'ntp'
+	option enabled '1'
+	option enable_server '0'
+	list server '162.159.200.123'
+	list server '162.159.200.1'
+	list server '216.239.35.0'
+	list server '0.openwrt.pool.ntp.org'
+	list server '1.openwrt.pool.ntp.org'
+

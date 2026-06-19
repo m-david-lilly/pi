@@ -644,6 +644,40 @@ uci commit dhcp
 **Verify:** `nslookup openwrt.org 127.0.0.1` still resolves (DNS now flows through the
 DoH proxy). If it fails, revert `noresolv` and re-check the proxy port.
 
+> **NOT optional — DNS is dead without it (verified on hardware, 2026-06-19).** With
+> `peerdns='0'` on both WANs (FR-B6, Phase 3.1) the router has *no* upstream resolver at
+> all until this proxy is up — `nslookup` returns REFUSED, apk can't fetch, NTP can't
+> resolve pool hostnames, adblock can't download feeds. Install it as part of the base
+> build, not as an afterthought.
+>
+> **The manual dnsmasq wiring above is mostly unnecessary on current packages.**
+> `https-dns-proxy` 2026.03.18-r3 ships `dnsmasq_config_update='*'` and on
+> `enable`+`start` it auto-writes dnsmasq's upstream itself: sets `noresolv='1'`, adds
+> `server='127.0.0.1#5053'` *and* `#5054` (two instances: Cloudflare 5053 + Google 5054),
+> and **also auto-installs the force-DNS (port-53 redirect) and DoT-block (port-853 reject)
+> nft rules** — so Phase 5.4's manual force-DNS/DoT work is largely redundant once this is
+> installed. Just `apk add https-dns-proxy`, `/etc/init.d/https-dns-proxy enable`, then
+> `restart`, and verify dnsmasq resolves. Do NOT also manually pin `server=127.0.0.1#5053`
+> by hand — you'll get duplicate entries.
+>
+> **DoH bootstrap on a fresh box has a chicken-and-egg with apk:** apk needs DNS to fetch
+> the proxy package, but DNS is down because the proxy isn't installed. Break it by
+> temporarily pointing the resolver at a public DNS server for the install only:
+> `rm /etc/resolv.conf && printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf`, run the
+> `apk add`, then restore the symlink: `ln -sf /tmp/resolv.conf /etc/resolv.conf`.
+>
+> **COLD-BOOT CLOCK DEADLOCK (real, fixed) — see Phase 0/NTP note.** The Pi 5 has no RTC.
+> On cold boot the clock is stale; `https-dns-proxy` does DoH over TLS, which fails cert
+> validation with a wrong clock; NTP (if configured with pool *hostnames*) needs DNS, which
+> needs the proxy, which needs the clock — a hard deadlock that leaves the box permanently
+> off by years. **Fix: put at least one IP-LITERAL NTP server first in the list** so
+> busybox `ntpd` sets the clock over UDP/123 with no DNS and no TLS, which then unblocks
+> DoH. This build uses Cloudflare `162.159.200.123`/`162.159.200.1` and Google
+> `216.239.35.0` ahead of the pool hostnames (`uci add_list system.ntp.server=<IP>`).
+> Verified: set clock to 2024, reboot, it self-corrects to real time. (`fake-hwclock` is
+> NOT in the 25.12.4 repo; the IP-literal NTP fix is the durable mitigation and is
+> independently sufficient.)
+
 ### 5.6 Daily feed refresh
 
 ```bash
@@ -658,10 +692,33 @@ grep -q '/etc/init.d/adblock reload' /etc/crontabs/root || \
 **Verify:**
 
 ```bash
-# From a LAN client:
-nslookup doubleclick.net 192.168.1.1      # expect NXDOMAIN / 0.0.0.0
-/etc/init.d/adblock search doubleclick.net  # shows which feed blocked it
+# From a LAN client. NOTE: pick a domain that is actually IN the feeds — the bare apex
+# 'doubleclick.net' is NOT in oisd_big/certpl/hagezi (only subdomains like
+# ads.doubleclick.net are). 'analytics.google.com' and 'ads.doubleclick.net' are good
+# positive tests; expect NXDOMAIN. 'github.com' must still resolve.
+nslookup ads.doubleclick.net 192.168.1.1    # expect NXDOMAIN
+/etc/init.d/adblock search ads.doubleclick.net  # shows which feed blocked it
 ```
+
+> **Boot-time empty-list race (real, fixed 2026-06-19).** By default adblock runs at boot
+> (`mode: boot`) *before* WAN connectivity and the NTP clock fix are ready, so it cannot
+> download feeds and writes an **empty** blocklist — the router is unprotected until the
+> 5am cron `reload`. Fix: gate adblock on WAN ifup instead of boot. Set
+> `adblock.global.adb_trigger='wan1 wan2'` and `adb_triggerdelay='20'` (the 20s lets NTP
+> correct the clock first). The init script honors this: when `adb_trigger` is set it
+> *skips* the boot run and instead fires on the interface coming up. Verified: cold boot
+> with a stale clock → clock self-corrects → adblock triggers on WAN-up → 463k domains
+> loaded, no empty-list window beyond the trigger delay. Keep the 5am cron as the daily
+> refresh on top of this.
+>
+> **Feed catalog reality (adblock 4.5.6):** the `hagezi Pro/Pro++` and `hagezi TIF` tiers
+> and `urlhaus` named in FR-F2 do **not** exist in this version's catalog — only generic
+> `hagezi`, `oisd_big`/`oisd_small`, `certpl`, plus `doh_blocklist`, `stevenblack`,
+> `adguard`, etc. This build runs `oisd_big certpl hagezi` as the closest match. **Do NOT
+> add `doh_blocklist`** unless you first confirm it does not list `cloudflare-dns.com` /
+> `dns.google` — those are this router's own DoH upstreams (resolved by hostname), and
+> blocking them would blackhole the router's own resolver. FR-F2's full feed set is an
+> open gap against the installed adblock version, not a config error.
 
 ---
 

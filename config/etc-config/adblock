@@ -1,0 +1,17 @@
+
+config adblock 'global'
+	option adb_enabled '1'
+	option adb_debug '0'
+	option adb_nftforce '1'
+	option adb_dnsshift '0'
+	option adb_safesearch '0'
+	option adb_mail '0'
+	option adb_report '0'
+	option adb_dns 'dnsmasq'
+	option adb_fetchcmd 'uclient-fetch'
+	list adb_feed 'oisd_big'
+	list adb_feed 'certpl'
+	list adb_feed 'hagezi'
+	option adb_trigger 'wan1 wan2'
+	option adb_triggerdelay '20'
+
