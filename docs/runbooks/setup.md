@@ -254,17 +254,32 @@ ip link show wan2dev   # exists, MAC matches <MAC_WAN2>
 ip link show landev    # exists, MAC matches <MAC_LAN>
 ```
 
-> **Carrier caveat (verified on 25.12.4, 2026-06-17).** The rename `ethN -> <pinned
-> name>` does **NOT** apply while the USB NIC is **carrier-less** (no cable plugged in).
-> Linux cannot rename a device that netifd is mid-setup on, and netifd defers setup of a
-> no-carrier interface — so `ip -br link` keeps showing `eth1`/`eth2` and the pinned name
-> is absent from `ubus call network.device status`, no matter how many times you
-> `reload_config`, `/etc/init.d/network restart`, or reboot. **This is expected, not a
-> failure.** The rename fires the moment the port gets link (a cable to a live device).
-> Consequence for sequencing: you cannot fully verify the MAC pins until the corresponding
-> uplink/LAN cable is attached (Phase 3 onward). Stage the pins + WAN interfaces, then plug
-> in a cable and expect the pinned name to appear at that point — do not chase the missing
-> rename with repeated restarts/reboots while the port is unplugged.
+> **CORRECTION (verified on hardware, 25.12.4, 2026-06-19) — supersedes the earlier
+> "carrier caveat".** An earlier bring-up concluded the MAC-pin rename "fires the moment
+> the port gets link." **That is wrong.** Re-verified on real hardware with both uplink
+> cables attached and carrier up: netifd does **NOT** honor the `config device` MAC alias
+> for these RTL8153 USB NICs at all — the rename never fires on `reload_config`,
+> `/etc/init.d/network restart`, **or a cold reboot with cables already in**. `ip -br link`
+> keeps showing `eth1`/`eth2`, and the WAN interfaces fail with `NO_DEVICE`. Carrier was a
+> red herring. Worse, USB enumeration swaps `eth1`<->`eth2` across reboots, so the kernel
+> names are not even stable.
+>
+> **The durable fix is a hotplug rename rule**, not the `config device` section. See
+> `config/hotplug/05-rename-wan-by-mac` in this repo: it renames each USB NIC by MAC at the
+> hotplug `add` event, *before* netifd/mwan3 bind to it. Install it to
+> `/etc/hotplug.d/net/05-rename-wan-by-mac` (`chmod +x`). Verified to rename correctly on a
+> clean cold boot with zero manual intervention. The `config device` MAC sections are kept
+> as documentation of intent but do nothing functional for these adapters.
+>
+> **Naming trap — names MUST NOT end in `dev`.** mwan3 2.12.0's `mwan3_route_line_dev()`
+> extracts a route's device with a greedy `sed -ne "s/.*dev \([^ ]*\).*/\1/p"`. A device
+> named `wan1dev` makes `.*dev ` swallow the trailing "dev " in the *name* and capture the
+> next token (`proto`) instead of the device — so mwan3 cannot map the per-WAN default route
+> to its table, silently **skips it**, and marked LAN traffic gets "Network unreachable"
+> (tables 1/2 never get a default route). This bit us for an entire session. Use names that
+> do not end in `dev`: this build uses **`uwan1`/`uwan2`** (USB uplink 1/2). The old
+> `wan1dev`/`wan2dev`/`landev` names below are RETAINED ONLY as the broken example — do not
+> use them.
 
 > From here on, refer to the WAN2 USB device as `wan2dev`, the LAN USB device as `landev`,
 > and the onboard NIC as `eth0`. This keeps the config stable across reboots.
@@ -310,11 +325,21 @@ uci set network.wanb.device='wan2dev'
 uci set network.wanb.proto='dhcp'
 uci set network.wanb.peerdns='0'
 
+# REQUIRED for dual-WAN: give each WAN a DISTINCT route metric. Without distinct
+# metrics, both DHCP clients race to install a default route into the main table and
+# only ONE wins — mwan3rtmon then has nothing to copy into the losing WAN's routing
+# table, so that WAN's tracking pings fail and it flaps offline. (Verified on hardware
+# 2026-06-19: this is exactly what happens when the metrics are omitted.) Lower metric =
+# preferred default; the values themselves are arbitrary as long as they differ.
+uci set network.wan.metric='10'
+uci set network.wanb.metric='20'
+
 uci commit network
 /etc/init.d/network restart
 ```
 
-**Expected:** `wan` and `wanb` each obtain a DHCP lease from their respective modems.
+**Expected:** `wan` and `wanb` each obtain a DHCP lease from their respective modems, and
+`ip route show table main | grep default` shows **two** default routes (distinct metrics).
 
 ### 3.2 Firewall zones (one WAN-type zone per uplink)
 

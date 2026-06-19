@@ -1,0 +1,57 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	list ipaddr '127.0.0.1/8'
+
+config globals 'globals'
+	option dhcp_default_duid '00049ebd99d36e234d4fb86d69f32f8cc50f'
+	option ula_prefix 'fd16:d057:7030::/48'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	list ipaddr '192.168.1.1/24'
+	option ip6assign '60'
+
+config device 'dev_wan1'
+	option name 'uwan1'
+	option macaddr '44:ed:57:10:00:30'
+
+config device 'dev_wan2'
+	option name 'uwan2'
+	option macaddr '00:e0:4c:68:01:1e'
+
+config interface 'wan1'
+	option device 'uwan1'
+	option proto 'dhcp'
+	option peerdns '0'
+	option metric '10'
+
+config interface 'wan2'
+	option device 'uwan2'
+	option proto 'dhcp'
+	option peerdns '0'
+	option metric '20'
+
+config interface 'wgvpn'
+	option proto 'wireguard'
+	option private_key '<WG_PRIVATE_KEY>'
+	list addresses '10.14.0.2/16'
+	option mtu '1412'
+	option disabled '1'
+
+config wireguard_wgvpn
+	option public_key '<SERVER_PUBLIC_KEY>'
+	option endpoint_host 'REPLACE.prod.surfshark.com'
+	option endpoint_port '51820'
+	option persistent_keepalive '25'
+	option route_allowed_ips '0'
+	list allowed_ips '0.0.0.0/0'
+	list allowed_ips '::/0'
+

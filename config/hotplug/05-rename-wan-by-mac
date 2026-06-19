@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pin USB WAN NICs to stable names by MAC at hotplug "add", BEFORE netifd/mwan3
+# bind to them. Two reasons this rule exists (both verified on 25.12.4, 2026-06):
+#  1. netifd does NOT honor the /etc/config/network `config device` MAC alias for
+#     these RTL8153 USB adapters - the rename never fires on reload/restart/cold
+#     boot, and USB enumeration swaps eth1<->eth2 across reboots.
+#  2. Names MUST NOT end in "dev": mwan3 2.12.0 mwan3_route_line_dev() extracts a
+#     route device with a greedy `s/.*dev \([^ ]*\).*/\1/` - a name like "wan1dev"
+#     makes it capture the NEXT token ("proto"), so per-WAN default routes are
+#     never installed into tables 1/2 and marked LAN traffic gets "unreachable".
+#     Hence uwan1/uwan2 (USB uplink 1/2), not wan1dev/wan2dev.
+[ "$ACTION" = add ] || exit 0
+case "$DEVICENAME" in eth0|uwan1|uwan2) exit 0 ;; esac
+
+mac=$(cat "/sys/class/net/$DEVICENAME/address" 2>/dev/null)
+case "$mac" in
+	44:ed:57:10:00:30) target=uwan1 ;;
+	00:e0:4c:68:01:1e) target=uwan2 ;;
+	*) exit 0 ;;
+esac
+
+[ "$DEVICENAME" = "$target" ] && exit 0
+[ -e "/sys/class/net/$target" ] && exit 0
+
+# A device must be admin-DOWN to be renamed; freshly-added NICs are down.
+ip link set "$DEVICENAME" down 2>/dev/null
+if ip link set "$DEVICENAME" name "$target" 2>/dev/null; then
+	logger -t rename-wan "renamed $DEVICENAME ($mac) -> $target"
+fi
