@@ -1,0 +1,17 @@
+# Files that run on the OpenWrt router MUST stay LF-only. A CRLF line ending in a
+# shell script fails on the Pi with `bad interpreter: /bin/sh^M`; CRLF in a UCI
+# config or hotplug rule can corrupt parsing. Windows git defaults to
+# core.autocrlf=true, so without this a clone/edit on Windows would convert them.
+# These rules override any local autocrlf setting.
+
+*.sh            text eol=lf
+scripts/mwan3.user        text eol=lf
+config/hotplug/*          text eol=lf
+config/etc-config/*       text eol=lf
+config/mwan3              text eol=lf
+
+# Docs/markdown: LF too, for consistency across platforms.
+*.md            text eol=lf
+
+# Let git auto-detect everything else.
+*               text=auto

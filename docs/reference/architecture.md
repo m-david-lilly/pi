@@ -86,7 +86,7 @@ the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to 
         RTL8153, MAC-pinned      RTL8153, MAC-pinned
                   │                       │
    ┌──────────────┼───────────────────────┼──────────────────────┐
-   │  Raspberry Pi 5  —  OpenWrt 25.12.4 (bcm2712 / aarch64)      │
+   │  Raspberry Pi 5  —  OpenWrt 25.12.4 (bcm2712 / aarch64)     │
    │                                                             │
    │   WAN1 (network: wan1)        WAN2 (network: wan2)          │
    │   metric 10                   metric 20                     │
@@ -107,7 +107,7 @@ the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to 
    │              zone: lan  masq=0   (Pi WiFi radio DISABLED)   │
    └─────────────────┬───────────────────────────────────────────┘
                      │  (single onboard LAN port)
-              ┌──────┴───────────────┐
+              ┌──────┴───────────-────┐
               │  downstream WiFi      │   NETGEAR Orbi MR60, NAT mode
               │  router (MR60)        │   WAN=DHCP from Pi (192.168.1.x)
               │  LAN 10.0.0.0/24      │   LAN/WiFi = 10.0.0.x to clients

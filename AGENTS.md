@@ -14,14 +14,21 @@ reach the box, and what's left. **Read it before touching anything** — several
 ## TL;DR for picking up
 
 1. The router works end-to-end. Don't "fix" it blind.
-2. **You cannot reach the Pi over IPv4 from the owner's Mac** — Zscaler eats it.
-   Use **IPv6 link-local** (see [Accessing the Pi](#accessing-the-pi)).
+2. **Reaching the Pi depends on your workstation:**
+   - **Normal machine (no corporate VPN):** plain `ssh root@192.168.1.1` works.
+   - **Machine running Zscaler/Cisco AnyConnect/etc.:** IPv4 to `192.168.x` is
+     swallowed by the VPN — use **IPv6 link-local** instead (see
+     [Accessing the Pi](#accessing-the-pi)). This bit the original Mac hard.
 3. The deployed config is captured in `config/` and applied by `scripts/bringup.sh`.
    The docs in `docs/reference/` + `docs/planning/requirements.md` are **as-built**
    and authoritative. `docs/runbooks/setup.md` is the *original design* with
    as-built correction callouts — where they disagree, **as-built wins**.
-4. Before concluding the Pi is broken, **check the workstation** (Zscaler/routing)
-   — we re-flashed the SD card twice on a misdiagnosis that was Zscaler all along.
+4. Before concluding the Pi is broken, **check the workstation** (corporate-VPN /
+   routing) — the original Mac re-flashed the SD twice on a misdiagnosis that was
+   Zscaler all along.
+5. **Shell scripts and configs are LF-only** (`.gitattributes` enforces it). If you
+   edit on Windows, do NOT let your editor save CRLF — a `\r` in a script fails on
+   the Pi with `bad interpreter: /bin/sh^M`.
 
 ---
 
@@ -46,10 +53,14 @@ reach the box, and what's left. **Read it before touching anything** — several
 
 ## The traps (each of these cost real time — do not re-derive)
 
-### 1. Zscaler blocks IPv4 to the Pi from the owner's Mac
-The owner's Mac runs **Zscaler** (corporate VPN, **cannot be disabled**). It
-intercepts IPv4 to RFC1918 (`192.168.x`, `10.x`) at the packet-filter layer, so
-`ping`/`ssh`/`scp` to `192.168.1.1` **time out even though the Pi is healthy**.
+### 1. A corporate VPN (Zscaler) blocks IPv4 to the Pi — workstation-specific
+This bit the **original Mac**, which runs **Zscaler** (corporate VPN, **cannot be
+disabled**). Zscaler/Cisco-AnyConnect-class clients intercept IPv4 to RFC1918
+(`192.168.x`, `10.x`) at the packet-filter layer, so `ping`/`ssh`/`scp` to
+`192.168.1.1` **time out even though the Pi is healthy**. **A clean machine with
+no such VPN does NOT have this problem — plain `ssh root@192.168.1.1` works.** If
+your workstation has no corporate VPN, you can skip the IPv6-link-local dance
+entirely; this trap is here so you recognize the symptom if you ever hit it.
 - **Tell:** ARP resolves the Pi's MAC, but unicast IPv4 (ping/ssh/port-22) is
   filtered; `ping -b en7 192.168.1.1` (interface-bound) works while plain `ping`
   fails. A `route add -host ... -interface` does NOT fix it (Zscaler is below
@@ -124,22 +135,65 @@ its resolver.
 
 ## Accessing the Pi
 
-**From the owner's Mac (Zscaler active): use IPv6 link-local, NOT 192.168.1.1.**
+**Default (normal machine, no corporate VPN) — plain IPv4 over the LAN:**
 
 ```sh
-# Discover neighbors on the wired interface (replace en7 with the live one):
-ping6 -c3 ff02::1%en7
-# The Pi is the neighbor whose MAC matches br-lan: 2c:cf:67:6b:d0:d7
-# (EUI-64 link-local, stable):
-ssh -o StrictHostKeyChecking=no 'root@fe80::2ecf:67ff:fe6b:d0d7%en7'
+ssh root@192.168.1.1          # Pi's LAN/management address
+scp -O localfile root@192.168.1.1:/path/    # see scp note below
 ```
 
-- Only works while **wired to the same L2 segment** as the Pi.
+You must be on the Pi's LAN to reach `192.168.1.1` — either wired into the Pi's
+onboard port, or (more likely) joined to the **downstream WiFi router** (Orbi
+MR60, SSID set by the owner). On the MR60's `10.0.0.x` network, `192.168.1.1` is
+the MR60's WAN gateway = the Pi; it's reachable as long as the MR60 doesn't block
+WAN-side management (if it does, wire directly into the Pi's onboard port).
+
+**Only if your workstation runs Zscaler / Cisco AnyConnect / similar** (it
+intercepts IPv4 to `192.168.x` — see trap #1): use **IPv6 link-local**, which the
+VPN can't capture. Requires being **wired to the same L2 segment** as the Pi.
+
+```sh
+ping6 -c3 ff02::1%<iface>      # discover neighbors; <iface> = your wired NIC
+# The Pi is the neighbor whose MAC matches br-lan: 2c:cf:67:6b:d0:d7
+ssh -o StrictHostKeyChecking=no 'root@fe80::2ecf:67ff:fe6b:d0d7%<iface>'
+```
+
+On **Windows**, the link-local zone index is the numeric interface index, not a
+name: `ssh root@fe80::2ecf:67ff:fe6b:d0d7%12` (find it with `netsh interface ipv6
+show interfaces`). But on a no-VPN Windows box you should not need this — plain
+`ssh root@192.168.1.1` is the path.
+
+Notes:
 - SSH **key auth** is installed (owner's `id_rsa.pub` in `/etc/dropbear/authorized_keys`).
+  A new workstation needs its own key added — append your public key to that file
+  over an existing session, or use the root password (in the owner's gitignored
+  secrets, not in this repo).
 - dropbear has **no sftp-server** → plain `scp` fails; use `scp -O` (legacy proto).
-- From a **non-Zscaler device**, plain `ssh root@192.168.1.1` works normally.
+  Windows OpenSSH `scp` supports `-O` as well.
 - Pi 5 LED: **green = up**, **amber/off = not booted** (check this before assuming
   a software fault). Reboot ≈ 80s to SSH, +40s for carrier/DHCP/mwan3 to settle.
+
+---
+
+## Windows workstation notes
+
+The command examples in this repo are POSIX (the router is BusyBox `ash`; the
+original workstation was macOS). On Windows:
+
+- **Use an SSH client that supports `scp -O`:** Windows 10/11 built-in **OpenSSH**
+  (`ssh`/`scp` in PowerShell) works and supports `-O`. WSL is an alternative and
+  gives you a full Unix shell for the link-local / `ping6` commands if ever needed.
+- **Line endings are the big trap.** Git on Windows defaults to `core.autocrlf=true`.
+  The repo's `.gitattributes` forces LF on `*.sh`, `config/*`, `mwan3.user`, and
+  `*.md`, so a fresh clone is safe — but **do not override it**, and make sure your
+  editor (VS Code: "LF" in the status bar) doesn't re-save scripts as CRLF. A `\r`
+  in a script run on the Pi fails with `bad interpreter: /bin/sh^M`. To sanity-check
+  after editing: `git ls-files --eol scripts/` should show `w/lf` (not `w/crlf`).
+- **Editing files that get pushed to the Pi:** edit here, push to the Pi, run there.
+  The on-Pi files are the live system; keep `config/` in the repo as source of truth
+  (pull `/etc/config/*` back after any live change).
+- The IPv6 link-local zone syntax differs (`%<index>` not `%<name>`) — but you only
+  need it under a corporate VPN, which a clean Windows box won't have.
 
 ---
 
