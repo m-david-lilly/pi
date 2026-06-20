@@ -9,6 +9,49 @@ DNS filtering and an on-demand Surfshark WireGuard VPN.
   Never commit real secrets (private keys, auth tokens) to git.
 - Most commands run **on the router** over SSH (`ssh root@192.168.1.1`) unless a step
   says "on your workstation".
+
+> ## ⚠️ Management-access gotchas (learned the hard way, 2026-06-20)
+>
+> **Zscaler (or any always-on corporate VPN) on the management workstation EATS LAN
+> traffic to the Pi.** Zscaler/Cisco Secure Client install packet filters that intercept
+> IPv4 to RFC1918 ranges including `192.168.x` — so `ping`/`ssh` to `192.168.1.1` time out
+> *even though the Pi is perfectly healthy*. The tell: **ARP resolves the Pi's MAC but
+> unicast IPv4 (ping/ssh/port-22) is filtered**, and `ping -b <iface>` (interface-bound)
+> succeeds while plain `ping` fails. `route add -host ... -interface` does NOT fix it
+> (Zscaler filters below the routing layer), and Zscaler usually can't be disabled
+> (corporate-locked). **This cost an entire session and TWO unnecessary SD re-flashes** —
+> a working router was misdiagnosed as bricked because IPv4 went dark on the Mac.
+>
+> **Zscaler-proof management path: IPv6 link-local.** Link-local (`fe80::…%iface`) is
+> scoped to the physical interface and cannot be routed into Zscaler's tunnel:
+> ```bash
+> ping6 -c3 ff02::1%en7                 # discover neighbors; Pi = the one whose MAC
+>                                        # matches br-lan (e.g. 2c:cf:67:6b:d0:d7)
+> ssh root@fe80::2ecf:67ff:fe6b:d0d7%en7   # SSH straight to the Pi, bypasses Zscaler
+> ```
+> Replace `en7` with your workstation's wired interface and the `fe80::…` with the Pi's
+> br-lan EUI-64 link-local. This only works while wired to the same L2 segment.
+>
+> **DIAGNOSE BEFORE RE-FLASHING.** If IPv4 to the Pi dies, FIRST check the workstation:
+> `netstat -rn -f inet | grep 192.168` (look for a `utun*`/VPN interface owning the Pi's
+> subnet) and `pgrep -fl zscaler`. Do NOT assume the Pi is bricked and re-flash — confirm
+> the Pi is actually down (LED amber = not booted; green = running) and unreachable from a
+> NON-Zscaler device or via IPv6-LL first.
+>
+> **LAN renumber is treated as KNOWN-BAD here — Pi stays at `192.168.1.1`.** Renumbering
+> `network.lan.ipaddr` to `192.168.10.1` *appeared* to strand the box (LAN input filtered)
+> across multiple attempts, but this was very likely the same Zscaler artifact (it
+> intercepts `192.168.10.x` too) rather than a real Pi fault — never conclusively
+> root-caused. Rather than renumber, a downstream NAT WiFi router must use its OWN
+> non-`192.168.1.x` LAN subnet (e.g. `192.168.20.0/24`); its WAN takes a DHCP lease from
+> the Pi on `192.168.1.x`. See `scripts/bringup.sh` (deliberately does not renumber).
+
+> **One-shot rebuild: `scripts/bringup.sh`.** After flashing a custom Firmware-Selector
+> image (package set = hardware.md §7 + `https-dns-proxy` + `coreutils-timeout`), deploy
+> `config/mwan3`, `config/hotplug/05-rename-wan-by-mac`, and the `scripts/*` to the Pi,
+> then run `bringup.sh` to apply the whole stack idempotently (WANs, DNS/DoH, adblock,
+> weighting, NTP fix) without renumbering. Reboot once after to fire the hotplug NIC
+> rename. This replaces the piecemeal Phase 2–6 steps for a known-good rebuild.
 - The Pi 5 is **bcm27xx / bcm2712, aarch64 (ARMv8-A Cortex-A76)**. Use only the
   `bcm27xx/bcm2712` `rpi-5` aarch64 image; an image for a different Raspberry Pi target
   will not boot.
