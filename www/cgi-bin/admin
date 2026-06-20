@@ -1,0 +1,465 @@
+#!/bin/sh
+# CGI endpoint for the admin dashboard.
+# Serves JSON status data (GET ?section=...) and handles actions (POST).
+
+send_json() {
+	printf 'Content-Type: application/json\r\n\r\n'
+}
+
+send_error() {
+	printf 'Status: 400 Bad Request\r\nContent-Type: application/json\r\n\r\n'
+	printf '{"error":"%s"}\n' "$1"
+	exit 0
+}
+
+# ── GET handlers ────────────────────────────────────────────────────
+
+get_system() {
+	send_json
+	info=$(ubus call system info 2>/dev/null)
+	board=$(ubus call system board 2>/dev/null)
+	load1=$(echo "$info" | jsonfilter -e '@.load[0]')
+	load5=$(echo "$info" | jsonfilter -e '@.load[1]')
+	load15=$(echo "$info" | jsonfilter -e '@.load[2]')
+	uptime=$(echo "$info" | jsonfilter -e '@.uptime')
+	mem_total=$(echo "$info" | jsonfilter -e '@.memory.total')
+	mem_avail=$(echo "$info" | jsonfilter -e '@.memory.available')
+	root_total=$(echo "$info" | jsonfilter -e '@.root.total')
+	root_used=$(echo "$info" | jsonfilter -e '@.root.used')
+	hostname=$(echo "$board" | jsonfilter -e '@.hostname')
+	model=$(echo "$board" | jsonfilter -e '@.model')
+	kernel=$(echo "$board" | jsonfilter -e '@.kernel')
+	version=$(echo "$board" | jsonfilter -e '@.release.version')
+	cat <<-EOF
+	{
+		"hostname": "$hostname",
+		"model": "$model",
+		"kernel": "$kernel",
+		"version": "$version",
+		"uptime": $uptime,
+		"load": [${load1:-0}, ${load5:-0}, ${load15:-0}],
+		"memory": {"total": $mem_total, "available": $mem_avail},
+		"disk": {"total": $root_total, "used": $root_used}
+	}
+	EOF
+}
+
+get_wan() {
+	send_json
+	printf '{'
+	first=1
+	for iface in wan1 wan2; do
+		status=$(ubus call network.interface.$iface status 2>/dev/null)
+		[ -z "$status" ] && continue
+		up=$(echo "$status" | jsonfilter -e '@.up')
+		uptime=$(echo "$status" | jsonfilter -e '@.uptime')
+		proto=$(echo "$status" | jsonfilter -e '@.proto')
+		device=$(echo "$status" | jsonfilter -e '@.l3_device')
+		metric=$(echo "$status" | jsonfilter -e '@.metric')
+		addr=$(echo "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+		gw=$(echo "$status" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+
+		rx=0; tx=0
+		if [ -d "/sys/class/net/$device" ]; then
+			rx=$(cat /sys/class/net/$device/statistics/rx_bytes 2>/dev/null || echo 0)
+			tx=$(cat /sys/class/net/$device/statistics/tx_bytes 2>/dev/null || echo 0)
+		fi
+
+		[ "$first" = 1 ] && first=0 || printf ','
+		cat <<-EOF
+		"$iface": {
+			"up": $up,
+			"uptime": ${uptime:-0},
+			"proto": "$proto",
+			"device": "${device:-unknown}",
+			"metric": ${metric:-0},
+			"address": "${addr:-}",
+			"gateway": "${gw:-}",
+			"rx_bytes": $rx,
+			"tx_bytes": $tx
+		}
+		EOF
+	done
+	printf '}'
+}
+
+get_mwan3() {
+	send_json
+	mwan=$(ubus call mwan3 status 2>/dev/null)
+	if [ -z "$mwan" ]; then
+		echo '{"error":"mwan3 not available"}'
+		return
+	fi
+	echo "$mwan"
+}
+
+get_adblock() {
+	send_json
+	raw=$(/etc/init.d/adblock status 2>&1)
+	status=$(echo "$raw" | sed -n 's/.*adblock_status[[:space:]]*:[[:space:]]*//p')
+	domains=$(echo "$raw" | sed -n 's/.*blocked_domains[[:space:]]*:[[:space:]]*//p' | tr -d ' ')
+	feeds=$(echo "$raw" | sed -n 's/.*active_feeds[[:space:]]*:[[:space:]]*//p')
+	last_run=$(echo "$raw" | sed -n 's/.*last_run[[:space:]]*:[[:space:]]*//p')
+	dns_backend=$(echo "$raw" | sed -n 's/.*dns_backend[[:space:]]*:[[:space:]]*//p')
+	cat <<-EOF
+	{
+		"status": "$status",
+		"blocked_domains": "${domains:-0}",
+		"active_feeds": "$feeds",
+		"dns_backend": "$dns_backend",
+		"last_run": "$last_run"
+	}
+	EOF
+}
+
+get_dns() {
+	send_json
+	doh_count=$(pgrep -f https-dns-proxy | wc -l)
+	doh_pids=$(pgrep -f https-dns-proxy | tr '\n' ',' | sed 's/,$//')
+	servers=$(uci get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | grep -v '^$' | while read -r s; do printf '"%s",' "$s"; done | sed 's/,$//')
+	noresolv=$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
+	cat <<-EOF
+	{
+		"doh_running": $([ "$doh_count" -gt 0 ] && echo true || echo false),
+		"doh_instances": $doh_count,
+		"doh_pids": "$doh_pids",
+		"noresolv": "${noresolv:-0}",
+		"upstream_servers": [$servers]
+	}
+	EOF
+}
+
+SERVERS_DIR="/etc/wireguard/servers"
+
+# Parse a Surfshark .conf file → sets: _pubkey, _endpoint, _port
+parse_conf() {
+	_pubkey=""; _endpoint=""; _port=""
+	[ -f "$1" ] || return 1
+	_pubkey=$(sed -n 's/^PublicKey *= *//p' "$1")
+	_ep_full=$(sed -n 's/^Endpoint *= *//p' "$1")
+	_endpoint="${_ep_full%:*}"
+	_port="${_ep_full##*:}"
+	[ -n "$_pubkey" ] && [ -n "$_endpoint" ]
+}
+
+# Derive a display name from a server id (e.g. us-phx → Phoenix, US)
+server_name() {
+	case "$1" in
+		us-phx) echo "Phoenix, US" ;;
+		us-nyc) echo "New York, US" ;;
+		us-lax) echo "Los Angeles, US" ;;
+		us-chi) echo "Chicago, US" ;;
+		us-mia) echo "Miami, US" ;;
+		us-dal) echo "Dallas, US" ;;
+		us-las) echo "Las Vegas, US" ;;
+		us-sea) echo "Seattle, US" ;;
+		us-den) echo "Denver, US" ;;
+		us-atl) echo "Atlanta, US" ;;
+		ca-van) echo "Vancouver, CA" ;;
+		ca-tor) echo "Toronto, CA" ;;
+		ca-mon) echo "Montreal, CA" ;;
+		uk-lon) echo "London, UK" ;;
+		uk-man) echo "Manchester, UK" ;;
+		de-ber) echo "Berlin, DE" ;;
+		de-fra) echo "Frankfurt, DE" ;;
+		fr-par) echo "Paris, FR" ;;
+		nl-ams) echo "Amsterdam, NL" ;;
+		jp-tok) echo "Tokyo, JP" ;;
+		sg-sin) echo "Singapore, SG" ;;
+		au-syd) echo "Sydney, AU" ;;
+		au-mel) echo "Melbourne, AU" ;;
+		br-sao) echo "Sao Paulo, BR" ;;
+		in-mum) echo "Mumbai, IN" ;;
+		ph-mnl) echo "Manila, PH" ;;
+		kr-seo) echo "Seoul, KR" ;;
+		hk-hkg) echo "Hong Kong, HK" ;;
+		*)
+			country=$(echo "$1" | sed 's/-.*//' | tr 'a-z' 'A-Z')
+			city=$(echo "$1" | sed 's/[a-z]*-//' | sed 's/./\U&/')
+			echo "$city, $country"
+			;;
+	esac
+}
+
+get_vpn() {
+	send_json
+	vpn_json_raw
+}
+
+vpn_json_raw() {
+	wg_iface=$(uci get network.wgvpn.proto 2>/dev/null)
+	if [ -z "$wg_iface" ]; then
+		echo '{"configured": false, "servers": {}}'
+		return
+	fi
+	wg_status=$(ubus call network.interface.wgvpn status 2>/dev/null)
+	if [ -n "$wg_status" ]; then
+		up=$(echo "$wg_status" | jsonfilter -e '@.up')
+	else
+		up=false
+	fi
+	pbr_enabled=$(uci get pbr.config.enabled 2>/dev/null)
+	cur_endpoint=$(uci get network.@wireguard_wgvpn[0].endpoint_host 2>/dev/null)
+
+	active_server=""
+	servers_json="{"
+	first=1
+	for conf in "$SERVERS_DIR"/*.conf; do
+		[ -f "$conf" ] || continue
+		sid=$(basename "$conf" .conf)
+		parse_conf "$conf" || continue
+		name=$(server_name "$sid")
+		if [ "$_endpoint" = "$cur_endpoint" ]; then
+			active_server="$sid"
+		fi
+		[ "$first" = 1 ] && first=0 || servers_json="$servers_json,"
+		servers_json="$servers_json \"$sid\": {\"name\": \"$name\", \"endpoint_host\": \"$_endpoint\", \"endpoint_port\": \"$_port\"}"
+	done
+	servers_json="$servers_json }"
+
+	cat <<-EOF
+	{
+		"configured": true,
+		"up": $up,
+		"proto": "$wg_iface",
+		"pbr_enabled": "${pbr_enabled:-0}",
+		"active_server": "$active_server",
+		"endpoint_host": "${cur_endpoint:-}",
+		"servers": $servers_json
+	}
+	EOF
+}
+
+get_all() {
+	send_json
+	# Collect each section without its own HTTP header
+	sys=$(get_system_raw)
+	wan=$(get_wan_raw)
+	mwan=$(ubus call mwan3 status 2>/dev/null || echo '{}')
+	adb=$(get_adblock_raw)
+	dns=$(get_dns_raw)
+	vpn=$(get_vpn_raw)
+	cat <<-EOF
+	{
+		"system": $sys,
+		"wan": $wan,
+		"mwan3": $mwan,
+		"adblock": $adb,
+		"dns": $dns,
+		"vpn": $vpn
+	}
+	EOF
+}
+
+# Raw variants (no HTTP header) for the combined "all" endpoint
+get_system_raw() {
+	info=$(ubus call system info 2>/dev/null)
+	board=$(ubus call system board 2>/dev/null)
+	load1=$(echo "$info" | jsonfilter -e '@.load[0]')
+	load5=$(echo "$info" | jsonfilter -e '@.load[1]')
+	load15=$(echo "$info" | jsonfilter -e '@.load[2]')
+	uptime=$(echo "$info" | jsonfilter -e '@.uptime')
+	mem_total=$(echo "$info" | jsonfilter -e '@.memory.total')
+	mem_avail=$(echo "$info" | jsonfilter -e '@.memory.available')
+	root_total=$(echo "$info" | jsonfilter -e '@.root.total')
+	root_used=$(echo "$info" | jsonfilter -e '@.root.used')
+	hostname=$(echo "$board" | jsonfilter -e '@.hostname')
+	model=$(echo "$board" | jsonfilter -e '@.model')
+	kernel=$(echo "$board" | jsonfilter -e '@.kernel')
+	version=$(echo "$board" | jsonfilter -e '@.release.version')
+	cat <<-EOF
+	{
+		"hostname": "$hostname",
+		"model": "$model",
+		"kernel": "$kernel",
+		"version": "$version",
+		"uptime": $uptime,
+		"load": [${load1:-0}, ${load5:-0}, ${load15:-0}],
+		"memory": {"total": $mem_total, "available": $mem_avail},
+		"disk": {"total": $root_total, "used": $root_used}
+	}
+	EOF
+}
+
+get_wan_raw() {
+	printf '{'
+	first=1
+	for iface in wan1 wan2; do
+		status=$(ubus call network.interface.$iface status 2>/dev/null)
+		[ -z "$status" ] && continue
+		up=$(echo "$status" | jsonfilter -e '@.up')
+		uptime=$(echo "$status" | jsonfilter -e '@.uptime')
+		proto=$(echo "$status" | jsonfilter -e '@.proto')
+		device=$(echo "$status" | jsonfilter -e '@.l3_device')
+		metric=$(echo "$status" | jsonfilter -e '@.metric')
+		addr=$(echo "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+		gw=$(echo "$status" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+		rx=0; tx=0
+		if [ -d "/sys/class/net/$device" ]; then
+			rx=$(cat /sys/class/net/$device/statistics/rx_bytes 2>/dev/null || echo 0)
+			tx=$(cat /sys/class/net/$device/statistics/tx_bytes 2>/dev/null || echo 0)
+		fi
+		[ "$first" = 1 ] && first=0 || printf ','
+		cat <<-EOF
+		"$iface": {
+			"up": $up,
+			"uptime": ${uptime:-0},
+			"proto": "$proto",
+			"device": "${device:-unknown}",
+			"metric": ${metric:-0},
+			"address": "${addr:-}",
+			"gateway": "${gw:-}",
+			"rx_bytes": $rx,
+			"tx_bytes": $tx
+		}
+		EOF
+	done
+	printf '}'
+}
+
+get_adblock_raw() {
+	raw=$(/etc/init.d/adblock status 2>&1)
+	status=$(echo "$raw" | sed -n 's/.*adblock_status[[:space:]]*:[[:space:]]*//p')
+	domains=$(echo "$raw" | sed -n 's/.*blocked_domains[[:space:]]*:[[:space:]]*//p' | tr -d ' ')
+	feeds=$(echo "$raw" | sed -n 's/.*active_feeds[[:space:]]*:[[:space:]]*//p')
+	last_run=$(echo "$raw" | sed -n 's/.*last_run[[:space:]]*:[[:space:]]*//p')
+	dns_backend=$(echo "$raw" | sed -n 's/.*dns_backend[[:space:]]*:[[:space:]]*//p')
+	cat <<-EOF
+	{
+		"status": "$status",
+		"blocked_domains": "${domains:-0}",
+		"active_feeds": "$feeds",
+		"dns_backend": "$dns_backend",
+		"last_run": "$last_run"
+	}
+	EOF
+}
+
+get_dns_raw() {
+	doh_count=$(pgrep -f https-dns-proxy | wc -l)
+	doh_pids=$(pgrep -f https-dns-proxy | tr '\n' ',' | sed 's/,$//')
+	servers=$(uci get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | grep -v '^$' | while read -r s; do printf '"%s",' "$s"; done | sed 's/,$//')
+	noresolv=$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
+	cat <<-EOF
+	{
+		"doh_running": $([ "$doh_count" -gt 0 ] && echo true || echo false),
+		"doh_instances": $doh_count,
+		"doh_pids": "$doh_pids",
+		"noresolv": "${noresolv:-0}",
+		"upstream_servers": [$servers]
+	}
+	EOF
+}
+
+get_vpn_raw() {
+	vpn_json_raw
+}
+
+# ── POST handlers ───────────────────────────────────────────────────
+
+handle_post() {
+	read -r POSTDATA
+	action=$(echo "$POSTDATA" | jsonfilter -e '@.action' 2>/dev/null)
+	case "$action" in
+		adblock_reload)
+			send_json
+			/etc/init.d/adblock reload >/dev/null 2>&1 &
+			echo '{"ok":true,"message":"adblock reload started"}'
+			;;
+		adblock_enable)
+			send_json
+			uci set adblock.global.adb_enabled='1'
+			uci commit adblock
+			/etc/init.d/adblock reload >/dev/null 2>&1 &
+			echo '{"ok":true,"message":"adblock enabled"}'
+			;;
+		adblock_disable)
+			send_json
+			uci set adblock.global.adb_enabled='0'
+			uci commit adblock
+			/etc/init.d/adblock stop >/dev/null 2>&1 &
+			echo '{"ok":true,"message":"adblock disabled"}'
+			;;
+		vpn_on)
+			send_json
+			if [ -x /usr/bin/vpn-toggle.sh ]; then
+				/usr/bin/vpn-toggle.sh on >/dev/null 2>&1 &
+				echo '{"ok":true,"message":"VPN turning on"}'
+			else
+				echo '{"ok":false,"message":"vpn-toggle.sh not found"}'
+			fi
+			;;
+		vpn_off)
+			send_json
+			if [ -x /usr/bin/vpn-toggle.sh ]; then
+				/usr/bin/vpn-toggle.sh off >/dev/null 2>&1 &
+				echo '{"ok":true,"message":"VPN turning off"}'
+			else
+				echo '{"ok":false,"message":"vpn-toggle.sh not found"}'
+			fi
+			;;
+		vpn_switch)
+			send_json
+			server_id=$(echo "$POSTDATA" | jsonfilter -e '@.server' 2>/dev/null)
+			if [ -z "$server_id" ]; then
+				echo '{"ok":false,"message":"missing server id"}'
+				break
+			fi
+			conf_file="$SERVERS_DIR/$server_id.conf"
+			if ! parse_conf "$conf_file"; then
+				echo "{\"ok\":false,\"message\":\"unknown server: $server_id\"}"
+				break
+			fi
+			new_name=$(server_name "$server_id")
+			was_up=$(ubus call network.interface.wgvpn status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)
+			if [ "$was_up" = "true" ]; then
+				ifdown wgvpn 2>/dev/null
+				sleep 1
+			fi
+			uci set network.@wireguard_wgvpn[0].public_key="$_pubkey"
+			uci set network.@wireguard_wgvpn[0].endpoint_host="$_endpoint"
+			uci set network.@wireguard_wgvpn[0].endpoint_port="${_port:-51820}"
+			uci commit network
+			if [ "$was_up" = "true" ]; then
+				ifup wgvpn 2>/dev/null &
+			fi
+			echo "{\"ok\":true,\"message\":\"Switched to $new_name\"}"
+			;;
+		wan_weight)
+			send_json
+			if [ -x /usr/bin/wan-weight.sh ]; then
+				/usr/bin/wan-weight.sh >/dev/null 2>&1 &
+				echo '{"ok":true,"message":"WAN weight update started"}'
+			else
+				echo '{"ok":false,"message":"wan-weight.sh not found"}'
+			fi
+			;;
+		*)
+			send_error "unknown action: $action"
+			;;
+	esac
+}
+
+# ── Router ──────────────────────────────────────────────────────────
+
+case "$REQUEST_METHOD" in
+	GET)
+		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([^&]*\).*/\1/p')
+		case "$section" in
+			system)  get_system ;;
+			wan)     get_wan ;;
+			mwan3)   get_mwan3 ;;
+			adblock) get_adblock ;;
+			dns)     get_dns ;;
+			vpn)     get_vpn ;;
+			all)     get_all ;;
+			*)       send_error "unknown section: $section (use: system,wan,mwan3,adblock,dns,vpn,all)" ;;
+		esac
+		;;
+	POST)
+		handle_post
+		;;
+	*)
+		send_error "method not allowed"
+		;;
+esac

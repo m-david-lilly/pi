@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Admin</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2d3a;
+  --text: #e4e4e7;
+  --text-dim: #8b8d98;
+  --accent: #3b82f6;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --radius: 10px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 1.4rem; font-weight: 600; }
+header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
+.luci-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+.luci-link:hover { text-decoration: underline; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.card h2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card h2 .badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.badge-up { background: rgba(34,197,94,0.15); color: var(--green); }
+.badge-down { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-warn { background: rgba(245,158,11,0.15); color: var(--amber); }
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 0.88rem;
+  border-bottom: 1px solid var(--border);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-label { color: var(--text-dim); }
+.stat-value { font-weight: 500; font-variant-numeric: tabular-nums; }
+.wan-block { margin-bottom: 14px; }
+.wan-block:last-child { margin-bottom: 0; }
+.wan-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.dot-green { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+.dot-red { background: var(--red); box-shadow: 0 0 6px rgba(239,68,68,0.5); }
+.bar-track {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.5s ease;
+}
+.bar-fill.bar-green { background: var(--green); }
+.bar-fill.bar-amber { background: var(--amber); }
+.bar-fill.bar-red { background: var(--red); }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn:hover { background: var(--border); border-color: var(--text-dim); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-green { border-color: var(--green); color: var(--green); }
+.btn-green:hover { background: rgba(34,197,94,0.1); }
+.btn-red { border-color: var(--red); color: var(--red); }
+.btn-red:hover { background: rgba(239,68,68,0.1); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.mwan-policy { margin-bottom: 10px; }
+.mwan-policy-name {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.mwan-bars { display: flex; gap: 4px; align-items: center; }
+.mwan-bar-segment {
+  height: 22px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text);
+  transition: width 0.5s ease;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.mwan-bar-wan1 { background: var(--accent); }
+.mwan-bar-wan2 { background: #8b5cf6; }
+.server-list {
+  list-style: none;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.server-list li {
+  padding: 3px 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.78rem;
+}
+.loading {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  padding: 10px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  z-index: 100;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.server-list-vpn { margin-top: 10px; }
+.server-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+  transition: border-color 0.15s;
+}
+.server-item.active { border-color: var(--green); }
+.server-item .server-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.server-item .server-endpoint {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+.server-item .active-tag {
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: rgba(34,197,94,0.15);
+  color: var(--green);
+  font-weight: 500;
+}
+@media (max-width: 600px) {
+  body { padding: 12px; }
+  .grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Pi Admin</h1>
+  <div class="meta">
+    <div id="header-host"></div>
+    <div id="header-refresh">Auto-refresh: 10s</div>
+    <a href="/cgi-bin/luci/" class="luci-link">OpenWrt LuCI</a>
+  </div>
+</header>
+
+<div class="grid">
+
+  <!-- System -->
+  <div class="card">
+    <h2>System <span class="badge badge-up" id="sys-badge"></span></h2>
+    <div id="sys-body"><span class="loading">Loading...</span></div>
+  </div>
+
+  <!-- WAN -->
+  <div class="card">
+    <h2>WAN Interfaces</h2>
+    <div id="wan-body"><span class="loading">Loading...</span></div>
+  </div>
+
+  <!-- mwan3 -->
+  <div class="card">
+    <h2>Load Balancing (mwan3)</h2>
+    <div id="mwan-body"><span class="loading">Loading...</span></div>
+    <div class="actions">
+      <button class="btn" onclick="postAction('wan_weight')">Re-weigh WANs</button>
+    </div>
+  </div>
+
+  <!-- Adblock -->
+  <div class="card">
+    <h2>DNS Adblock <span class="badge" id="adb-badge"></span></h2>
+    <div id="adb-body"><span class="loading">Loading...</span></div>
+    <div class="actions" id="adb-actions"></div>
+  </div>
+
+  <!-- DNS -->
+  <div class="card">
+    <h2>DNS / DoH</h2>
+    <div id="dns-body"><span class="loading">Loading...</span></div>
+  </div>
+
+  <!-- VPN -->
+  <div class="card">
+    <h2>VPN (WireGuard) <span class="badge" id="vpn-badge"></span></h2>
+    <div id="vpn-body"><span class="loading">Loading...</span></div>
+    <div class="actions" id="vpn-actions"></div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/cgi-bin/admin';
+let refreshTimer;
+
+function formatUptime(s) {
+  if (!s || s < 0) return '—';
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+
+function formatLoad(v) {
+  return (v / 65536).toFixed(2);
+}
+
+function pct(used, total) {
+  if (!total) return 0;
+  return Math.round((used / total) * 100);
+}
+
+function barClass(p) {
+  if (p > 90) return 'bar-red';
+  if (p > 70) return 'bar-amber';
+  return 'bar-green';
+}
+
+function statRow(label, value) {
+  return '<div class="stat-row"><span class="stat-label">' + label + '</span><span class="stat-value">' + value + '</span></div>';
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 3000);
+}
+
+function renderSystem(d) {
+  const el = document.getElementById('sys-body');
+  const badge = document.getElementById('sys-badge');
+  badge.textContent = 'v' + d.version;
+  const memPct = pct(d.memory.total - d.memory.available, d.memory.total);
+  const diskPct = pct(d.disk.used, d.disk.total);
+  el.innerHTML =
+    statRow('Model', d.model) +
+    statRow('Hostname', d.hostname) +
+    statRow('Kernel', d.kernel) +
+    statRow('Uptime', formatUptime(d.uptime)) +
+    statRow('Load', formatLoad(d.load[0]) + ' / ' + formatLoad(d.load[1]) + ' / ' + formatLoad(d.load[2])) +
+    statRow('Memory', formatBytes(d.memory.total - d.memory.available) + ' / ' + formatBytes(d.memory.total) + ' (' + memPct + '%)') +
+    '<div class="bar-track"><div class="bar-fill ' + barClass(memPct) + '" style="width:' + memPct + '%"></div></div>' +
+    statRow('Disk', d.disk.used + ' / ' + d.disk.total + ' KB (' + diskPct + '%)') +
+    '<div class="bar-track"><div class="bar-fill ' + barClass(diskPct) + '" style="width:' + diskPct + '%"></div></div>';
+  document.getElementById('header-host').textContent = d.hostname + ' — ' + d.model;
+}
+
+function renderWan(d) {
+  const el = document.getElementById('wan-body');
+  let html = '';
+  for (const name in d) {
+    const w = d[name];
+    html += '<div class="wan-block">';
+    html += '<div class="wan-header"><span class="dot ' + (w.up ? 'dot-green' : 'dot-red') + '"></span>' +
+            name.toUpperCase() + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-dim)">(' + w.device + ')</span></div>';
+    html += statRow('Status', w.up ? 'Online' : 'Offline');
+    html += statRow('Address', w.address || '—');
+    html += statRow('Gateway', w.gateway || '—');
+    html += statRow('Uptime', formatUptime(w.uptime));
+    html += statRow('Metric', w.metric);
+    html += statRow('Traffic', formatBytes(w.rx_bytes) + ' rx / ' + formatBytes(w.tx_bytes) + ' tx');
+    html += '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderMwan(d) {
+  const el = document.getElementById('mwan-body');
+  let html = '';
+
+  if (d.interfaces) {
+    for (const name in d.interfaces) {
+      const iface = d.interfaces[name];
+      html += '<div class="stat-row"><span class="stat-label">' + name.toUpperCase() +
+              '</span><span class="stat-value"><span class="dot ' + (iface.status === 'online' ? 'dot-green' : 'dot-red') +
+              '" style="margin-right:6px"></span>' + iface.status + '</span></div>';
+    }
+  }
+
+  if (d.policies && d.policies.ipv4 && d.policies.ipv4.balanced) {
+    html += '<div style="margin-top:12px">';
+    html += '<div class="mwan-policy-name">Balanced policy</div>';
+    const segs = d.policies.ipv4.balanced;
+    const total = segs.reduce(function(s, x) { return s + x.percent; }, 0) || 1;
+    html += '<div class="mwan-bars">';
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      if (s.percent <= 0) continue;
+      const w = Math.max(Math.round((s.percent / total) * 100), 8);
+      html += '<div class="mwan-bar-segment mwan-bar-' + s.interface + '" style="width:' + w + '%">' +
+              s.interface + ' ' + s.percent + '%</div>';
+    }
+    html += '</div></div>';
+  }
+
+  el.innerHTML = html || '<span class="loading">No mwan3 data</span>';
+}
+
+function renderAdblock(d) {
+  const el = document.getElementById('adb-body');
+  const badge = document.getElementById('adb-badge');
+  const enabled = d.status === 'enabled';
+  badge.textContent = enabled ? 'Active' : 'Disabled';
+  badge.className = 'badge ' + (enabled ? 'badge-up' : 'badge-down');
+  el.innerHTML =
+    statRow('Blocked domains', Number(d.blocked_domains).toLocaleString()) +
+    statRow('Active feeds', d.active_feeds || '—') +
+    statRow('DNS backend', d.dns_backend || '—') +
+    statRow('Last run', d.last_run || '—');
+
+  const actions = document.getElementById('adb-actions');
+  actions.innerHTML =
+    '<button class="btn" onclick="postAction(\'adblock_reload\')">Reload Lists</button>' +
+    (enabled
+      ? '<button class="btn btn-red" onclick="postAction(\'adblock_disable\')">Disable</button>'
+      : '<button class="btn btn-green" onclick="postAction(\'adblock_enable\')">Enable</button>');
+}
+
+function renderDns(d) {
+  const el = document.getElementById('dns-body');
+  let html = statRow('DoH Proxy', d.doh_running ? 'Running (' + d.doh_instances + ' instances)' : 'Stopped');
+  html += statRow('No-resolv', d.noresolv === '1' ? 'Yes (DoH only)' : 'No');
+  if (d.upstream_servers && d.upstream_servers.length) {
+    html += '<div style="margin-top:10px"><span class="stat-label" style="font-size:0.82rem">Upstream servers</span>';
+    html += '<ul class="server-list">';
+    for (let i = 0; i < d.upstream_servers.length; i++) {
+      html += '<li>' + d.upstream_servers[i] + '</li>';
+    }
+    html += '</ul></div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderVpn(d) {
+  const el = document.getElementById('vpn-body');
+  const badge = document.getElementById('vpn-badge');
+  const actions = document.getElementById('vpn-actions');
+  if (!d.configured) {
+    badge.textContent = 'Not configured';
+    badge.className = 'badge badge-warn';
+    el.innerHTML = statRow('Status', 'WireGuard interface not configured');
+    actions.innerHTML = '';
+    return;
+  }
+  badge.textContent = d.up ? 'Connected' : 'Off';
+  badge.className = 'badge ' + (d.up ? 'badge-up' : 'badge-down');
+
+  let activeLabel = d.endpoint_host || '—';
+  if (d.servers && d.active_server && d.servers[d.active_server]) {
+    activeLabel = d.servers[d.active_server].name;
+  }
+
+  let html = statRow('Status', d.up ? 'Connected' : 'Disconnected') +
+    statRow('Server', activeLabel) +
+    statRow('PBR', d.pbr_enabled === '1' ? 'Enabled' : 'Disabled');
+
+  if (d.servers && Object.keys(d.servers).length > 0) {
+    html += '<div class="server-list-vpn">';
+    for (const id in d.servers) {
+      const s = d.servers[id];
+      const isActive = (id === d.active_server);
+      html += '<div class="server-item' + (isActive ? ' active' : '') + '">' +
+        '<div class="server-info">' +
+          '<span class="dot ' + (isActive && d.up ? 'dot-green' : '') + '"></span>' +
+          '<div><div>' + s.name + '</div>' +
+          '<div class="server-endpoint">' + s.endpoint_host + '</div></div>' +
+        '</div>' +
+        '<div>';
+      if (isActive) {
+        html += '<span class="active-tag">Active</span>';
+      } else {
+        html += '<button class="btn" onclick="switchVpnServer(\'' + id + '\')">Select</button>';
+      }
+      html += '</div></div>';
+    }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+  actions.innerHTML = d.up
+    ? '<button class="btn btn-red" onclick="postAction(\'vpn_off\')">Disconnect</button>'
+    : '<button class="btn btn-green" onclick="postAction(\'vpn_on\')">Connect</button>';
+}
+
+function switchVpnServer(serverId) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(function(b) { b.disabled = true; });
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'vpn_switch', server: serverId})
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      showToast(data.message || 'Done');
+      setTimeout(fetchAll, 2000);
+    })
+    .catch(function(err) {
+      showToast('Error: ' + err.message);
+    })
+    .finally(function() {
+      btns.forEach(function(b) { b.disabled = false; });
+    });
+}
+
+function fetchAll() {
+  fetch(API + '?section=all')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.system)  renderSystem(data.system);
+      if (data.wan)     renderWan(data.wan);
+      if (data.mwan3)   renderMwan(data.mwan3);
+      if (data.adblock) renderAdblock(data.adblock);
+      if (data.dns)     renderDns(data.dns);
+      if (data.vpn)     renderVpn(data.vpn);
+    })
+    .catch(function(err) {
+      console.error('Fetch error:', err);
+    });
+}
+
+function postAction(action) {
+  var btns = document.querySelectorAll('.btn');
+  btns.forEach(function(b) { b.disabled = true; });
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: action})
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      showToast(data.message || 'Done');
+      setTimeout(fetchAll, 2000);
+    })
+    .catch(function(err) {
+      showToast('Error: ' + err.message);
+    })
+    .finally(function() {
+      btns.forEach(function(b) { b.disabled = false; });
+    });
+}
+
+fetchAll();
+refreshTimer = setInterval(fetchAll, 10000);
+</script>
+</body>
+</html>
