@@ -46,51 +46,47 @@ get_system() {
 
 get_wan() {
 	send_json
-	printf '{'
-	first=1
-	for iface in wan1 wan2; do
-		status=$(ubus call network.interface.$iface status 2>/dev/null)
-		[ -z "$status" ] && continue
-		up=$(echo "$status" | jsonfilter -e '@.up')
-		uptime=$(echo "$status" | jsonfilter -e '@.uptime')
-		proto=$(echo "$status" | jsonfilter -e '@.proto')
-		device=$(echo "$status" | jsonfilter -e '@.l3_device')
-		metric=$(echo "$status" | jsonfilter -e '@.metric')
-		addr=$(echo "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-		gw=$(echo "$status" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
-
-		rx=0; tx=0
-		if [ -d "/sys/class/net/$device" ]; then
-			rx=$(cat /sys/class/net/$device/statistics/rx_bytes 2>/dev/null || echo 0)
-			tx=$(cat /sys/class/net/$device/statistics/tx_bytes 2>/dev/null || echo 0)
-		fi
-
-		[ "$first" = 1 ] && first=0 || printf ','
-		cat <<-EOF
-		"$iface": {
-			"up": $up,
-			"uptime": ${uptime:-0},
-			"proto": "$proto",
-			"device": "${device:-unknown}",
-			"metric": ${metric:-0},
-			"address": "${addr:-}",
-			"gateway": "${gw:-}",
-			"rx_bytes": $rx,
-			"tx_bytes": $tx
-		}
-		EOF
-	done
-	printf '}'
+	wan_json_raw
 }
 
 get_mwan3() {
 	send_json
+	mwan3_json_raw
+}
+
+mwan3_json_raw() {
 	mwan=$(ubus call mwan3 status 2>/dev/null)
 	if [ -z "$mwan" ]; then
 		echo '{"error":"mwan3 not available"}'
 		return
 	fi
-	echo "$mwan"
+	ct_dump=$(conntrack -L 2>/dev/null)
+	wan1_flows=$(echo "$ct_dump" | grep -c 'mark=256')
+	wan2_flows=$(echo "$ct_dump" | grep -c 'mark=512')
+	total=$((wan1_flows + wan2_flows))
+	if [ "$total" -gt 0 ]; then
+		wan1_pct=$((wan1_flows * 100 / total))
+		wan2_pct=$((100 - wan1_pct))
+	else
+		wan1_pct=0; wan2_pct=0
+	fi
+	# Extract interface statuses
+	wan1_status=$(echo "$mwan" | jsonfilter -e '@.interfaces.wan1.status' 2>/dev/null)
+	wan2_status=$(echo "$mwan" | jsonfilter -e '@.interfaces.wan2.status' 2>/dev/null)
+	cat <<-EOF
+	{
+		"interfaces": {
+			"wan1": {"status": "${wan1_status:-unknown}"},
+			"wan2": {"status": "${wan2_status:-unknown}"}
+		},
+		"flows": {
+			"wan1": $wan1_flows,
+			"wan2": $wan2_flows,
+			"wan1_pct": $wan1_pct,
+			"wan2_pct": $wan2_pct
+		}
+	}
+	EOF
 }
 
 get_adblock() {
@@ -235,7 +231,7 @@ get_all() {
 	# Collect each section without its own HTTP header
 	sys=$(get_system_raw)
 	wan=$(get_wan_raw)
-	mwan=$(ubus call mwan3 status 2>/dev/null || echo '{}')
+	mwan=$(mwan3_json_raw)
 	adb=$(get_adblock_raw)
 	dns=$(get_dns_raw)
 	vpn=$(get_vpn_raw)
@@ -281,7 +277,25 @@ get_system_raw() {
 	EOF
 }
 
-get_wan_raw() {
+wan_json_raw() {
+	# Fetch external IPs in parallel to avoid sequential timeout stacking
+	ext_ip_wan1=""; ext_ip_wan2=""
+	tmpdir=$(mktemp -d)
+	dev1=$(ubus call network.interface.wan1 status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	dev2=$(ubus call network.interface.wan2 status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "$dev1" ] && curl -s --interface "$dev1" --max-time 4 https://api.ipify.org > "$tmpdir/wan1" 2>/dev/null &
+	[ -n "$dev2" ] && curl -s --interface "$dev2" --max-time 4 https://api.ipify.org > "$tmpdir/wan2" 2>/dev/null &
+	wait
+	ext_ip_wan1=$(cat "$tmpdir/wan1" 2>/dev/null)
+	ext_ip_wan2=$(cat "$tmpdir/wan2" 2>/dev/null)
+	isp_wan1=""; isp_wan2=""
+	[ -n "$ext_ip_wan1" ] && curl -s --max-time 3 "https://ipinfo.io/$ext_ip_wan1/org" > "$tmpdir/isp1" 2>/dev/null &
+	[ -n "$ext_ip_wan2" ] && curl -s --max-time 3 "https://ipinfo.io/$ext_ip_wan2/org" > "$tmpdir/isp2" 2>/dev/null &
+	wait
+	isp_wan1=$(cat "$tmpdir/isp1" 2>/dev/null | sed 's/^AS[0-9]* //')
+	isp_wan2=$(cat "$tmpdir/isp2" 2>/dev/null | sed 's/^AS[0-9]* //')
+	rm -rf "$tmpdir"
+
 	printf '{'
 	first=1
 	for iface in wan1 wan2; do
@@ -294,6 +308,10 @@ get_wan_raw() {
 		metric=$(echo "$status" | jsonfilter -e '@.metric')
 		addr=$(echo "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
 		gw=$(echo "$status" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+		case "$iface" in
+			wan1) ext_ip="$ext_ip_wan1"; isp="$isp_wan1" ;;
+			wan2) ext_ip="$ext_ip_wan2"; isp="$isp_wan2" ;;
+		esac
 		rx=0; tx=0
 		if [ -d "/sys/class/net/$device" ]; then
 			rx=$(cat /sys/class/net/$device/statistics/rx_bytes 2>/dev/null || echo 0)
@@ -309,12 +327,18 @@ get_wan_raw() {
 			"metric": ${metric:-0},
 			"address": "${addr:-}",
 			"gateway": "${gw:-}",
+			"external_ip": "${ext_ip:-}",
+			"isp": "${isp:-}",
 			"rx_bytes": $rx,
 			"tx_bytes": $tx
 		}
 		EOF
 	done
 	printf '}'
+}
+
+get_wan_raw() {
+	wan_json_raw
 }
 
 get_adblock_raw() {

@@ -367,7 +367,9 @@ function renderWan(d) {
     html += '<div class="wan-header"><span class="dot ' + (w.up ? 'dot-green' : 'dot-red') + '"></span>' +
             name.toUpperCase() + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-dim)">(' + w.device + ')</span></div>';
     html += statRow('Status', w.up ? 'Online' : 'Offline');
+    html += statRow('ISP', w.isp || '—');
     html += statRow('Address', w.address || '—');
+    html += statRow('External IP', w.external_ip || '—');
     html += statRow('Gateway', w.gateway || '—');
     html += statRow('Uptime', formatUptime(w.uptime));
     html += statRow('Metric', w.metric);
@@ -390,7 +392,26 @@ function renderMwan(d) {
     }
   }
 
-  if (d.policies && d.policies.ipv4 && d.policies.ipv4.balanced) {
+  if (d.flows && (d.flows.wan1 + d.flows.wan2) > 0) {
+    const total = d.flows.wan1 + d.flows.wan2;
+    html += '<div style="margin-top:12px">';
+    html += '<div class="mwan-policy-name">Active flows (' + total + ' total)</div>';
+    html += '<div class="mwan-bars">';
+    if (d.flows.wan1 > 0) {
+      const w1 = Math.max(d.flows.wan1_pct, 8);
+      html += '<div class="mwan-bar-segment mwan-bar-wan1" style="width:' + w1 + '%">' +
+              'wan1 ' + d.flows.wan1_pct + '%</div>';
+    }
+    if (d.flows.wan2 > 0) {
+      const w2 = Math.max(d.flows.wan2_pct, 8);
+      html += '<div class="mwan-bar-segment mwan-bar-wan2" style="width:' + w2 + '%">' +
+              'wan2 ' + d.flows.wan2_pct + '%</div>';
+    }
+    html += '</div>';
+    html += statRow('WAN1 flows', d.flows.wan1);
+    html += statRow('WAN2 flows', d.flows.wan2);
+    html += '</div>';
+  } else if (d.policies && d.policies.ipv4 && d.policies.ipv4.balanced) {
     html += '<div style="margin-top:12px">';
     html += '<div class="mwan-policy-name">Balanced policy</div>';
     const segs = d.policies.ipv4.balanced;
