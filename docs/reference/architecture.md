@@ -23,29 +23,54 @@ For detailed per-subsystem configuration see the sibling reference docs:
 
 - **Board:** Raspberry Pi 5 (BCM2712), aarch64 ARMv8-A Cortex-A76, quad-core
   @ 2.4 GHz, 4 GB RAM.
-- **OpenWrt target:** `bcm27xx/bcm2712`, device profile `rpi-5`, **current
-  stable** release (pin the exact version against the live OpenWrt download
-  page — verify against live source), **squashfs** image. Use only the aarch64
-  image for this target; an image for a different Raspberry Pi target will not boot.
-- **NIC layout:**
-  - Onboard gigabit Ethernet (wired to the RP1 I/O controller over a dedicated
-    lane, **not** shared with the USB bus) → used as the primary WAN uplink.
-  - 2× USB3 gigabit Ethernet adapters (RTL8153 via `kmod-usb-net-rtl8152`, or
-    AX88179 via `kmod-usb-net-asix-ax88179`) on the two USB3 (blue) ports → one
-    is the second WAN uplink, one is the LAN port to the switch.
-- **Interface pinning:** USB NIC enumeration order is not guaranteed across
-  reboots (eth1/eth2 can swap). **Both** USB NICs — the WAN2 uplink *and* the
-  LAN port — are pinned by MAC address in `/etc/config/network`; the onboard
-  GbE (eth0) is fixed and needs no pin. Pinning the WAN2 NIC keeps the mwan3
-  member-to-WAN mapping stable (a correctness requirement for per-flow
-  stickiness and weighting); pinning the LAN NIC keeps the trusted LAN zone from
-  landing on a WAN slot after a reboot-time swap.
+- **OpenWrt target:** `bcm27xx/bcm2712`, device profile `rpi-5`. **As-built: a
+  custom Firmware-Selector image of 25.12.4** (r32933) with the full package set
+  pre-baked (see [`./hardware.md`](./hardware.md) §7). **squashfs** image. Use
+  only the aarch64 image for this target; an image for a different Raspberry Pi
+  target will not boot.
+- **NIC layout (AS-BUILT — note this is the *inverse* of the original design,
+  which put WAN1 on the onboard port for throughput):**
+  - Onboard gigabit Ethernet (RP1, dedicated lane) → **LAN / management**
+    (`br-lan`, `192.168.1.1/24`). Keeping management on the fixed onboard port
+    is what keeps SSH alive across USB re-enumeration.
+  - 2× USB3 gigabit Ethernet adapters (RTL8153 via `kmod-usb-net-rtl8152`) on the
+    two USB3 (blue) ports → **both are WANs**: `uwan1` and `uwan2`. The original
+    docs' "fastest uplink on onboard GbE" recommendation (NFR-P3) was deliberately
+    NOT followed — management stability won over a marginal throughput edge on a
+    home dual-WAN box.
+- **Interface pinning (AS-BUILT — by HOTPLUG rule, NOT `config device`):** USB
+  NIC enumeration order is not guaranteed across reboots (eth1/eth2 swap, and did
+  swap on hardware). The two USB WAN NICs are pinned to stable names **by MAC at
+  the hotplug `add` event** via `/etc/hotplug.d/net/05-rename-wan-by-mac`
+  (in repo: `config/hotplug/05-rename-wan-by-mac`). **netifd does NOT honor the
+  `/etc/config/network` `config device` MAC alias for these RTL8153 USB NICs** —
+  verified on hardware: the rename never fired on reload/restart/cold-boot, and
+  carrier presence is irrelevant (an earlier "rename fires on carrier" theory was
+  falsified). The onboard GbE (`eth0` → `br-lan`) is fixed and needs no pin.
+- **Device names MUST NOT end in `dev`.** mwan3 2.12.0's `mwan3_route_line_dev()`
+  extracts a route's device with a greedy `sed -ne "s/.*dev \([^ ]*\).*/\1/p"`, so
+  a name like `wan1dev` is mis-parsed as the next token (`proto`), and the per-WAN
+  default route is silently dropped from tables 1/2 → marked LAN traffic gets
+  "Network unreachable". Hence the names `uwan1`/`uwan2` (USB uplink 1/2), never
+  `wan1dev`/`wan2dev`/`landev`.
 
 The Pi 5's two USB3 ports are **independent 5 Gbps xHCI controllers** in RP1 (not the
 Pi 4's single shared 5 Gbps path), so two USB3 GbE NICs at ~1 Gbps each do not contend at
 the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to the SoC**
 (~16 Gbps), which has ample headroom for 1 GbE + 2×5 Gbps USB. See
 [`./hardware.md`](./hardware.md) §4 for the full bandwidth model.
+
+> **No RTC → cold-boot clock/DNS/TLS deadlock (real, fixed).** The Pi 5 has no
+> battery-backed real-time clock, so on cold boot the clock is stale. The DNS
+> plane (DoH over TLS) fails cert validation with a wrong clock, and NTP using
+> pool *hostnames* needs DNS — which needs DoH — which needs a correct clock: a
+> hard circular deadlock that leaves the box permanently off by years. **Fix:
+> list IP-literal NTP servers FIRST** in `system.ntp.server` (Cloudflare
+> `162.159.200.123`/`.1`, Google `216.239.35.0`, ahead of the pool hostnames), so
+> busybox `ntpd` sets the clock over UDP/123 with no DNS and no TLS, breaking the
+> loop. (`fake-hwclock` is NOT in the 25.12.4 repo; the IP-literal-NTP fix is the
+> durable mitigation and is independently sufficient — verified by booting with a
+> deliberately stale 2024 clock and watching it self-correct.)
 
 ---
 
@@ -57,18 +82,19 @@ the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to 
             ISP / Uplink A          ISP / Uplink B
             (modem/ONT 1)           (modem/ONT 2)
                   │                       │
-        onboard GbE (eth0)      USB3 GbE #1 (eth1)
-        RP1 dedicated lane      RTL8153 / AX88179
+        USB3 GbE  (uwan1)        USB3 GbE  (uwan2)
+        RTL8153, MAC-pinned      RTL8153, MAC-pinned
                   │                       │
    ┌──────────────┼───────────────────────┼──────────────────────┐
-   │  Raspberry Pi 5  —  OpenWrt (bcm2712 / aarch64)             │
+   │  Raspberry Pi 5  —  OpenWrt 25.12.4 (bcm2712 / aarch64)      │
    │                                                             │
-   │   WAN1  (network: wan)         WAN2  (network: wanb)        │
-   │   zone: wan   masq=1           zone: wanb  masq=1           │
+   │   WAN1 (network: wan1)        WAN2 (network: wan2)          │
+   │   metric 10                   metric 20                     │
+   │   both in firewall zone: wan   (masq=1)                     │
    │      │                            │                         │
    │      └──────────┬─────────────────┘                         │
    │                 │  mwan3 (per-flow connmark balancer)       │
-   │                 │  + dnsmasq/adblock (DNS plane)            │
+   │                 │  + dnsmasq/adblock + https-dns-proxy (DNS)│
    │                 │  + pbr (VPN policy routing, OFF default)  │
    │                 │                                           │
    │             wgvpn (proto wireguard)  ── Surfshark           │
@@ -76,38 +102,48 @@ the controller level. The only shared resource is RP1's **PCIe 2.0 x4 uplink to 
    │             route_allowed_ips=0 (split via pbr, always)     │
    │             interface disabled=1  (tunnel OFF by default)   │
    │                 │                                           │
-   │              LAN (network: lan)                             │
-   │              USB3 GbE #2 (eth2)  zone: lan  masq=0          │
+   │              LAN / management (network: lan)                │
+   │              onboard GbE → br-lan (eth0) 192.168.1.1/24     │
+   │              zone: lan  masq=0   (Pi WiFi radio DISABLED)   │
    └─────────────────┬───────────────────────────────────────────┘
-                     │
-              ┌──────┴──────┐
-              │  LAN switch │
-              └──┬───┬───┬──┘
+                     │  (single onboard LAN port)
+              ┌──────┴───────────────┐
+              │  downstream WiFi      │   NETGEAR Orbi MR60, NAT mode
+              │  router (MR60)        │   WAN=DHCP from Pi (192.168.1.x)
+              │  LAN 10.0.0.0/24      │   LAN/WiFi = 10.0.0.x to clients
+              └──┬───┬───┬────────────┘
                  │   │   │
               client client client ...
-              (DNS forced to the Pi resolver via force-dns)
-
-  Optional / secondary: Pi 5 internal WiFi as a weak AP, OR a separate
-  dedicated AP device hung off the LAN switch (recommended over the
-  internal radio).
+              (non-Zscaler clients get the Pi's adblock + dual-WAN)
 ```
 
-Logical mapping summary:
+Logical mapping summary (as-built):
 
-| Role | Physical NIC | OpenWrt iface (`network`) | Firewall zone | NAT (`masq`) |
-|---|---|---|---|---|
-| WAN1 (primary) | onboard GbE | `eth0` → `wan` | `wan` | 1 |
-| WAN2 (secondary) | USB3 GbE #1 | `eth1` → `wanb` | `wanb` | 1 |
-| LAN | USB3 GbE #2 | `eth2` → `lan` | `lan` | 0 |
-| VPN tunnel | (virtual) | `wgvpn` (wireguard) | `vpn` | 1 |
+| Role | Physical NIC | Device | OpenWrt iface (`network`) | Firewall zone | NAT (`masq`) |
+|---|---|---|---|---|---|
+| LAN / management | onboard GbE | `eth0` → `br-lan` | `lan` (192.168.1.1/24) | `lan` | 0 |
+| WAN1 | USB3 RTL8153 #1 | `uwan1` (MAC-pinned) | `wan1` (dhcp, metric 10) | `wan` | 1 |
+| WAN2 | USB3 RTL8153 #2 | `uwan2` (MAC-pinned) | `wan2` (dhcp, metric 20) | `wan` | 1 |
+| VPN tunnel | (virtual) | `wgvpn` | `wgvpn` (wireguard) | `vpn` | 1 |
 
+> **Zone vs interface:** both WAN *interfaces* (`wan1`, `wan2`) sit in the single
+> firewall *zone* named `wan` (the zone's `network` list = `wan1 wan2`). Keeping
+> the zone named `wan` means every `src/dest='wan'` firewall rule stays valid;
+> mwan3 balances across the two *interfaces*, not zones.
+>
+> **Distinct interface metrics (10/20) are load-bearing:** without distinct
+> metrics only one DHCP default route lands in the main table and the other WAN
+> flaps offline. This is the *network-interface* metric layer — separate from
+> mwan3 *member* metrics (§7), which stay equal for active-active balancing.
+>
 > The `vpn` zone also carries `mtu_fix '1'` (a separate zone option, not a value
 > of `masq`) to MSS-clamp tunneled TCP. See §4 for the full per-zone options.
 >
-> Device names `eth0/eth1/eth2` are illustrative. The actual L3 device for each
-> network is resolved at runtime via
-> `ubus call network.interface.<name> status | jsonfilter -e '@.l3_device'` and
-> the NICs are MAC-pinned in `/etc/config/network`.
+> **Downstream WiFi:** the Pi's own WiFi radio is disabled. A NETGEAR Orbi MR60
+> runs in NAT mode off the Pi's single onboard LAN port (its WAN pulls a
+> `192.168.1.x` DHCP lease from the Pi; its own LAN serves `10.0.0.0/24`). Note
+> this double-NATs WiFi clients behind the Pi, so the Pi's per-client adblock
+> reporting sees only the MR60's WAN IP, not individual clients.
 
 ---
 
@@ -128,13 +164,17 @@ composable.
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  PLANE 1 — DNS / FILTERING                                       │
-│  dnsmasq  +  adblock (+ luci-app-adblock)                        │
+│  dnsmasq + adblock + https-dns-proxy (DoH)  (all + luci apps)    │
 │  - adblock returns NXDOMAIN for blocked domains                  │
-│  - feeds: hagezi Pro/Pro++, oisd Big, hagezi TIF, certpl, urlhaus│
-│  - force-dns (adb_nftforce): DNAT LAN port-53 → local resolver   │
-│  - optional encrypted upstream: https-dns-proxy (DoH) or stubby  │
+│  - feeds (adblock 4.5.6 catalog): oisd_big, certpl, hagezi       │
+│    (FR-F2's hagezi Pro/TIF + urlhaus do NOT exist in 4.5.6;      │
+│     these three are the closest available match — open gap)      │
+│  - https-dns-proxy DoH upstreams: Cloudflare 127.0.0.1#5053 +    │
+│    Google 127.0.0.1#5054. It AUTO-WIRES dnsmasq (noresolv +      │
+│    server=#5053/#5054) AND auto-installs force-DNS (port-53      │
+│    redirect) + DoT block (port-853 reject). WANs peerdns=0.      │
 │  Acts at DNS resolution time, BEFORE routing. VPN state never    │
-│  breaks it.                                                      │
+│  breaks it (VPN-OFF steady state).                               │
 └──────────────────────────────────────────────────────────────────┘
         │ resolved IP handed to the routing decision
         ▼
@@ -161,7 +201,7 @@ composable.
         ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  NAT / EGRESS                                                    │
-│  fw4 (nftables) per-zone masq: wan, wanb, vpn → masq=1           │
+│  fw4 (nftables) per-zone masq: wan (wan1+wan2), vpn → masq=1     │
 └──────────────────────────────────────────────────────────────────┘
 
   SUPPORTING:
@@ -175,7 +215,7 @@ Plane summary:
 
 | Plane | Package(s) | Mechanism | Mark / priority | Default state |
 |---|---|---|---|---|
-| DNS filtering | dnsmasq + adblock | NXDOMAIN + port-53 DNAT | n/a (NAT-layer DNS redirect) | ON |
+| DNS filtering | dnsmasq + adblock + https-dns-proxy | NXDOMAIN + port-53 DNAT + DoH upstream | n/a (NAT-layer DNS redirect) | ON |
 | VPN policy routing | pbr | fwmark + ip rule | mark `0x00010000`, mask `0x00ff0000`, prio `900` | **OFF** |
 | WAN balancing | mwan3 | connmark + ip rule | mask `0x3F00`, prio `2001-2254` | ON |
 | NAT | fw4 (nftables) | per-zone `masq` | n/a | ON |
@@ -192,10 +232,13 @@ Modern OpenWrt (22.03 and later — verify the exact release against the live
 OpenWrt source) uses **fw4 (nftables)**. Zones:
 
 - **`lan`** — `option network 'lan'`, `masq '0'`, `input/output/forward ACCEPT`
-  for LAN-side trust. Source of all client traffic.
-- **`wan`** — `option network 'wan'` (onboard GbE), `masq '1'`, `mtu_fix '1'`,
-  `input REJECT`, `forward REJECT`.
-- **`wanb`** — `option network 'wanb'` (USB3 #1), same options as `wan`.
+  for LAN-side trust. Onboard `eth0`/`br-lan`, 192.168.1.1/24. Source of all
+  client traffic (and the downstream MR60's WAN).
+- **`wan`** — `list network 'wan1'` + `list network 'wan2'` (BOTH USB WANs in
+  one zone), `masq '1'`, `mtu_fix '1'`, `input REJECT`, `forward DROP`. A single
+  zone named `wan` holds both WAN interfaces — so every `src/dest='wan'` rule
+  stays valid and mwan3 balances across the two interfaces within it. (There is
+  no separate `wanb` zone in the as-built config.)
 - **`vpn`** — `option network 'wgvpn'`, `masq '1'`, `mtu_fix '1'`,
   `forward REJECT`. WireGuard's per-packet overhead is **60 bytes over IPv4**
   (20 IP + 8 UDP + 32 WireGuard) ⇒ a 1500-byte path yields MTU **1440**; over
@@ -207,15 +250,14 @@ OpenWrt source) uses **fw4 (nftables)**. Zones:
 
 Forwardings (each direction is its own stanza):
 
-- `lan → wan`
-- `lan → wanb`
+- `lan → wan`  (the single `wan` zone covers both `wan1` and `wan2`)
 - `lan → vpn`
 
 Ownership notes:
 
-- **mwan3 owns** the choice between `wan` and `wanb` for each flow (it balances
-  across the `wan`/`wanb` *network* interfaces). The zone split exists for
-  firewall/NAT, not for mwan3.
+- **mwan3 owns** the choice between `wan1` and `wan2` for each flow (it balances
+  across the two *network* interfaces inside the single `wan` zone). The zone
+  exists for firewall/NAT, not for mwan3.
 - **`wgvpn` is NOT an mwan3 interface.** It lives in its own `vpn` zone and is a
   **pbr target**, not an mwan3 member. Adding `wgvpn` to a WAN zone (the minimal
   wiki approach) would make mwan3 try to balance the tunnel as if it were an
@@ -231,10 +273,13 @@ Ownership notes:
 VPN is OFF by default. A new outbound TCP connection from a LAN client:
 
 1. **DNS resolution.** Client's DNS query (port 53) is force-DNS DNAT'd to the
-   Pi's dnsmasq resolver. adblock has loaded the blocklists into dnsmasq; if the
-   domain is on a feed, dnsmasq returns **NXDOMAIN** and the connection never
-   starts. Otherwise dnsmasq resolves (optionally via an encrypted upstream:
-   `https-dns-proxy`/`stubby`) and returns the real IP.
+   Pi's dnsmasq resolver (https-dns-proxy auto-installs this redirect). adblock
+   has loaded the blocklists into dnsmasq; if the domain is on a feed, dnsmasq
+   returns **NXDOMAIN** and the connection never starts. Otherwise dnsmasq
+   forwards to its DoH upstream — `https-dns-proxy` on `127.0.0.1#5053`
+   (Cloudflare) / `#5054` (Google) — and returns the real IP. (Caveat: a client
+   behind Zscaler or another always-on VPN does its own in-tunnel DNS and bypasses
+   this entirely — the Pi's filtering only reaches non-VPN clients.)
 2. **First packet → mwan3.** The connection is NEW, so no connmark yet. pbr is
    OFF (no priority-900 rules match), so the packet falls through to mwan3's
    `2001-2254` ip-rule band.
@@ -246,8 +291,9 @@ VPN is OFF by default. A new outbound TCP connection from a LAN client:
    **every subsequent packet of that flow exits the same WAN**. This is the
    intrinsic per-flow stickiness — it satisfies "a TCP connection stays on one
    WAN for its lifetime" with no extra option.
-5. **Routing + NAT.** The ip rule routes the flow into that WAN's routing table;
-   the matching zone (`wan` or `wanb`) applies `masq` and egresses.
+5. **Routing + NAT.** The ip rule routes the flow into that WAN's routing table
+   (table 1 for `wan1`, table 2 for `wan2`); the `wan` zone applies `masq` and
+   egresses.
 6. **Failover.** mwan3track independently probes `track_ip` hosts per WAN. If a
    WAN fails enough consecutive checks it is marked down and removed from the
    live pool; with `flush_conntrack` set on `ifdown`/`disconnected`, stale flows
@@ -274,6 +320,13 @@ When the VPN toggle brings `wgvpn` up and enables the relevant pbr policy:
    this proxy on VPN-ON and back to a non-tunnel forwarder on VPN-OFF — pinning
    it as the *sole* upstream unconditionally would break DNS in the default-OFF
    state whenever the tunnel is down. See [`./vpn.md`](./vpn.md) §7 item 3.
+   > **STATUS — NOT YET IMPLEMENTED (deferred, accepted debt).** The `wgvpn`
+   > device-bind on `https-dns-proxy` and the toggle's upstream-switch are
+   > deliberately deferred until the VPN is actually enabled (it is staged
+   > default-OFF). **Consequence:** if the VPN is brought up today, the router's
+   > own upstream DNS egresses a physical WAN (encrypted under DoH, but not
+   > tunnel-routed), so **NFR-S2 is not yet met**. Close this during the Phase 8.6
+   > leak test before relying on the VPN for privacy.
 2. **First packet → pbr.** pbr's ip rules sit at priority **900**, *above*
    mwan3's `2001-2254` band, so they are evaluated first. If the flow matches a
    pbr policy (`src_addr` = a LAN subnet/IP/MAC, and/or `dest_addr` = IP or
@@ -342,12 +395,23 @@ Member / metric / weight semantics:
 
 - Members on the **same metric** load-balance; `weight` is the ratio of *new
   flows* among them. `weight` is only meaningful among equal-metric members.
-- If metrics **differ**, the lower-metric member takes ALL traffic and weight is
-  ignored (the higher-metric member becomes pure standby).
-- This build uses **active-active**: both members on metric `1`, weights driven
-  by the healthcheck. One `balanced` policy lists both members; one catch-all
-  rule (`dest_ip 0.0.0.0/0`) uses it. Dead members drop out of the live pool
-  automatically (mutual failover).
+- If member metrics **differ**, the lower-metric member takes ALL traffic and
+  weight is ignored (the higher-metric member becomes pure standby).
+- This build uses **active-active**: both balanced members on member metric `1`,
+  weights driven by the healthcheck. One `balanced` policy lists both members;
+  one catch-all rule (`dest_ip 0.0.0.0/0`) uses it. Dead members drop out of the
+  live pool automatically (mutual failover).
+
+> **Two independent "metric" layers — do not conflate:**
+> - **Network-interface metric** (`network.wan1.metric=10`, `network.wan2.metric=20`)
+>   — DISTINCT values. This is the kernel default-route metric in the *main*
+>   table; distinct values let both DHCP default routes coexist (without it, only
+>   one lands and the other WAN flaps offline — proven on hardware).
+> - **mwan3 member metric** (`mwan3.wanN_m1_*.metric=1`) — EQUAL values for the
+>   balanced members. This is mwan3's failover tier; equal = active-active.
+>
+> These are orthogonal: distinct *interface* metrics + equal *member* metrics is
+> the correct, working combination.
 
 mwan3 is connmark-based even on nftables (fw4) systems, so it pulls the
 `iptables-nft` / `kmod-nft-*` compatibility shims. Verify with `mwan3 status`
@@ -364,8 +428,9 @@ The healthcheck is **two cooperating layers** with separate jobs. Full detail in
 ```
 ┌─ Layer 1: LIVENESS (authoritative up/down) ───────────────────────┐
 │  mwan3track per WAN (built-in, already interface-bound)           │
-│  track_ip = 1.1.1.1, 8.8.8.8 ; reliability 2 ; interval 10 ;      │
-│  down 3 ; up 3                                                    │
+│  3 DISTINCT track_ip per WAN (wan1: 1.1.1.1/8.8.8.8/9.9.9.9;      │
+│  wan2: 1.0.0.1/8.8.4.4/149.112.112.112) ; reliability 2 (2-of-3); │
+│  interval 10 ; down 3 ; up 3                                      │
 │  → marks WAN up/down, triggers failover. The script NEVER does    │
 │    up/down itself (avoid two sources of truth).                   │
 └───────────────────────────────────────────────────────────────────┘
@@ -387,8 +452,11 @@ The healthcheck is **two cooperating layers** with separate jobs. Full detail in
 │    6. weight = clamp(round(mbps), 1, 1000)   ← floor at 1         │
 │  after all WANs, only if a weight changed > ~15%:                 │
 │    uci set mwan3.<member>.weight=<N>; uci commit mwan3;           │
-│    mwan3 restart   (or mwan3 ifdown/ifup to avoid a full reload)  │
+│    mwan3 ifup <iface>  (per changed iface — see "Why this shape") │
 └───────────────────────────────────────────────────────────────────┘
+
+  REQUIRES coreutils-timeout (busybox has no `timeout` applet; the
+  probe is wrapped in `timeout` — without it every probe silently fails).
 ```
 
 Why this shape:
@@ -401,9 +469,14 @@ Why this shape:
   failover is fast and independent of the 30-minute capacity cadence.
 - **Floor weight at 1.** `weight=0`/unset removes a member from balancing
   (effectively down); a slow-but-alive WAN must still get a sliver of traffic.
-- **Don't churn the routing tables.** Only commit + reload when a weight changes
-  beyond a threshold (after EWMA smoothing), because `mwan3 restart` briefly
-  tears down and rebuilds ip rules and can hiccup in-flight flows.
+- **Reapply with `mwan3 ifup <iface>`, NOT `mwan3 reload` (verified on 2.12.0).**
+  `mwan3 reload` does **not** re-evaluate member weights — a weight change +
+  reload leaves the live balanced split at its OLD ratio. Only `mwan3 ifup
+  <iface>` (per changed interface) or a full `mwan3 restart` applies a new weight;
+  FR-H13 forbids `restart` (it tears down all ip rules incl. the VPN WAN pin). So
+  the script commits then `ifup`s each changed interface. Only do this beyond the
+  ~15% EWMA threshold — `ifup` cycles the interface and (with `flush_conntrack`
+  set) resets that WAN's in-flight flows, so it must be rare and material.
 - **Mind data burn.** A bidirectional librespeed run can move hundreds of MB per
   WAN per run; serialize the two probes, run download-only, keep the cadence at
   ~30 min, and downgrade any metered uplink to a small curl `--limit-rate`

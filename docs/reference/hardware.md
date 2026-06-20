@@ -5,6 +5,20 @@ the rationale behind each choice, the USB-Ethernet adapter requirements, and rea
 throughput expectations. Use it as the procurement reference (shopping list) and as the
 ground truth for which OpenWrt target/drivers to build against.
 
+> ## ⚠️ AS-BUILT deviations (proven on hardware 2026-06-20)
+>
+> The original design (below) put WAN1 on the onboard GbE. **As-built it's inverted:**
+> - **Onboard `eth0` = LAN/management** (`br-lan`, 192.168.1.1/24). **Both** USB
+>   RTL8153 adapters = the WANs, renamed **`uwan1`/`uwan2`** (never `*dev` — a name
+>   ending in `dev` breaks mwan3 2.12.0's route-device regex). Management stability
+>   across USB re-enumeration won over the marginal throughput edge of WAN-on-onboard.
+> - **Rename is a HOTPLUG rule** (`/etc/hotplug.d/net/05-rename-wan-by-mac`), NOT the
+>   `config device` MAC alias — netifd ignores that alias for these NICs.
+> - **Image:** custom Firmware-Selector build of 25.12.4 with the full package set
+>   pre-baked, INCLUDING `https-dns-proxy` and `coreutils-timeout` (see §7).
+> - Each WAN interface gets a **distinct route metric** (wan1=10, wan2=20).
+> - Downstream WiFi = NETGEAR Orbi MR60 (NAT mode); the Pi's own radio is disabled.
+
 ---
 
 ## 1. Platform: Raspberry Pi 5 (4GB)
@@ -134,9 +148,10 @@ wired interfaces:
 
 - **WAN1** — uplink #1
 - **WAN2** — uplink #2 (for mwan3 dual-WAN balancing + failover)
-- **LAN** — downlink to the local switch
+- **LAN** — downlink to the local network (as-built: to the downstream Orbi MR60)
 
 One onboard NIC + the need for three ports = **two USB-Ethernet adapters are mandatory**.
+(As-built both USB NICs are the WANs and the onboard is LAN — see the as-built banner.)
 There is no way around this on a stock Pi 5 short of a multi-port PCIe NIC HAT (out of
 scope for this build).
 
@@ -150,11 +165,16 @@ PCIe 2.0 x4 uplink to the BCM2712 SoC, but at ~16 Gbps that link has ample headr
 1 GbE + 2×5 Gbps USB; this is not a Pi 4–style contention point.) Exploit the separate
 controllers:
 
-| Role | Interface              | Port                  | Why                                                              |
-| ---- | ---------------------- | --------------------- | ---------------------------------------------------------------- |
-| WAN1 | **onboard GbE**        | onboard               | Dedicated RP1 MAC, off the USB controllers — assign your **fastest uplink** here. |
-| WAN2 | USB3 GbE adapter #1    | USB3 (blue)           | Gigabit-capable USB3 path.                                       |
-| LAN  | USB3 GbE adapter #2    | USB3 (blue)           | Gigabit-capable USB3 path to the switch.                        |
+**Original design (table below):** fastest uplink on onboard GbE. **AS-BUILT:
+inverted** — onboard = LAN/management, both USB3 NICs = the WANs. The two USB3
+xHCI controllers are independent 5 Gbps lanes, so each gigabit WAN has ample
+headroom regardless; management stability across USB re-enumeration drove the swap.
+
+| Role (as-built) | Interface              | Device  | Port      | Why                                                |
+| ---- | ---------------------- | --------------------- | --------- | -------------------------------------------------- |
+| LAN / mgmt | **onboard GbE**  | `eth0`/`br-lan` | onboard   | Dedicated RP1 MAC, fixed — keeps management/SSH stable across USB re-enumeration. 192.168.1.1/24. |
+| WAN1 | USB3 GbE adapter #1    | `uwan1` (MAC-pinned) | USB3 (blue) | Gigabit USB3 path; MAC-pinned by hotplug rule.   |
+| WAN2 | USB3 GbE adapter #2    | `uwan2` (MAC-pinned) | USB3 (blue) | Gigabit USB3 path; MAC-pinned by hotplug rule.   |
 
 > **Never put a gigabit interface on a USB2 (black) port.** USB2 caps at ~480 Mbps
 > theoretical (~300 Mbps real-world). Both heavy NICs must be on the **USB3 (blue)** ports.
@@ -198,21 +218,31 @@ not intend to buy.
 ### Pin interfaces by MAC — critical for mwan3
 
 USB NIC **enumeration order is not guaranteed across reboots**: `eth1` and `eth2` can
-swap. If that happens, mwan3 member-to-WAN mapping silently points at the wrong uplink,
-breaking weighting and per-flow stickiness.
+swap (and did, on hardware). If that happens, mwan3 member-to-WAN mapping silently points
+at the wrong uplink, breaking weighting and per-flow stickiness.
 
-**Pin each interface by MAC address** in `/etc/config/network` (or via a hotplug rule) so
-the member→WAN mapping stays stable. Example:
+**AS-BUILT: pin by a HOTPLUG rule, NOT the `config device` MAC alias.** Verified on
+hardware (25.12.4): netifd does **not** apply the `/etc/config/network` `config device`
+MAC alias for these RTL8153 USB NICs — the rename never fires on reload/restart/cold-boot
+(carrier-independent). The working mechanism is `/etc/hotplug.d/net/05-rename-wan-by-mac`
+(in repo: `config/hotplug/05-rename-wan-by-mac`), which renames each NIC by MAC at the
+hotplug `add` event, before netifd/mwan3 bind. **Names MUST NOT end in `dev`** (mwan3
+2.12.0's greedy route-device regex mis-parses them) — use `uwan1`/`uwan2`:
 
+```sh
+# /etc/hotplug.d/net/05-rename-wan-by-mac  (abridged — see repo for the full guarded form)
+[ "$ACTION" = add ] || exit 0
+case "$(cat /sys/class/net/$DEVICENAME/address 2>/dev/null)" in
+  44:ed:57:10:00:30) target=uwan1 ;;   # MAC of USB3 adapter #1 — replace with real value
+  00:e0:4c:68:01:1e) target=uwan2 ;;   # MAC of USB3 adapter #2 — replace with real value
+  *) exit 0 ;;
+esac
+[ "$DEVICENAME" = "$target" ] && exit 0
+ip link set "$DEVICENAME" down && ip link set "$DEVICENAME" name "$target"
 ```
-config device
-	option name 'wan2'
-	option macaddr 'aa:bb:cc:dd:ee:ff'   # MAC of USB3 adapter #1 — replace with real value
 
-config device
-	option name 'lan_usb'
-	option macaddr 'aa:bb:cc:dd:ee:00'   # MAC of USB3 adapter #2 — replace with real value
-```
+(The `config device` MAC sections may be kept in `/etc/config/network` as documentation
+of intent, but they do nothing functional for these adapters.)
 
 ---
 
@@ -256,8 +286,8 @@ balancing would break NAT/TLS and is not how mwan3 works.
 | 3 | Active Cooler (or fan case)                   | Official Active Cooler                       | —                                        | Prevents throttling on a 24/7 box. |
 | 4 | Boot storage — **NVMe** (preferred)           | M.2 NVMe SSD + **M.2 HAT+** (PCIe 2.0 x1; Gen3 via override) | —                          | Best endurance for list/log churn. |
 | 4b| Boot storage — USB3 SSD (alternative)         | USB3 SSD                                     | (uses USB mass-storage, built-in)        | Good fallback; consumes a USB3 port. |
-| 5 | **USB-Ethernet adapter #1 (WAN2)**            | **RTL8153** USB3 gigabit                     | `kmod-usb-net-rtl8152` (+ `r8152-firmware`) | Verify chipset via `lsusb`. |
-| 6 | **USB-Ethernet adapter #2 (LAN)**             | **RTL8153** USB3 gigabit                     | `kmod-usb-net-rtl8152` (+ `r8152-firmware`) | Or AX88179 (`kmod-usb-net-asix-ax88179`). |
+| 5 | **USB-Ethernet adapter #1 (WAN1 → `uwan1`)**  | **RTL8153** USB3 gigabit                     | `kmod-usb-net-rtl8152` (+ `r8152-firmware`) | Verify chipset via `lsusb`. As-built both USB NICs are WANs. |
+| 6 | **USB-Ethernet adapter #2 (WAN2 → `uwan2`)**  | **RTL8153** USB3 gigabit                     | `kmod-usb-net-rtl8152` (+ `r8152-firmware`) | Or AX88179 (`kmod-usb-net-asix-ax88179`). LAN is the onboard port. |
 | 7 | Powered USB3 hub (contingency)                | Self-powered USB3                            | —                                        | Only if USB NICs flap on the Pi's own power. |
 | 8 | LAN switch                                     | Gigabit unmanaged/managed                    | —                                        | Hangs off the LAN USB-Ethernet port. |
 | 9 | (Optional) Dedicated WiFi AP                  | Separate AP device                           | —                                        | Internal Pi 5 radio is weak for AP duty. |
@@ -282,11 +312,13 @@ kmod-usb-net-rtl8152            # RTL8153 — pulls r8152-firmware
 mwan3
 luci-app-mwan3
 librespeed-cli                  # interface-bound capacity probe for the healthcheck
+coreutils-timeout               # REQUIRED: busybox has no `timeout`; wan-weight.sh wraps probes in it
 curl                            # fallback probe / liveness; OpenWrt ships uclient-fetch by default
 
 # DNS filtering (Goal 2)
 adblock
 luci-app-adblock
+https-dns-proxy                 # DoH resolver (Cloudflare 5053 + Google 5054); auto-wires dnsmasq + force-DNS/DoT
 
 # VPN (Goal 3)
 wireguard-tools
@@ -317,7 +349,9 @@ luci
 - [ ] **Under-powered:** Non-PD/3A supply → 600 mA cap → USB NIC brownout → phantom mwan3
       "WAN down". Use the 27W PSU (or powered hub).
 - [ ] **USB2 port for a gigabit WAN:** capped at ~300 Mbps real-world. Use blue USB3 ports.
-- [ ] **NIC name swap on reboot:** pin USB adapters by MAC in `/etc/config/network`.
+- [ ] **NIC name swap on reboot:** pin USB WAN adapters by MAC via the hotplug rule
+      (`/etc/hotplug.d/net/05-rename-wan-by-mac` → `uwan1`/`uwan2`); the `config device`
+      alias does NOT work for these NICs. Names must not end in `dev`.
 - [ ] **Wrong-chip / wrong-speed adapter:** verify with `lsusb`/`dmesg` before bulk buying;
       a listing sold as "RTL8153" may actually ship an RTL8156 (2.5G) or RTL8157 (5G) part.
       All are driven by `kmod-usb-net-rtl8152`, but you want the gigabit RTL8153 for this build.

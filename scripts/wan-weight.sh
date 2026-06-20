@@ -39,7 +39,7 @@ readonly WAN_MEMBERS="wan1:wan1_m1_w3 wan2:wan2_m1_w3"
 
 readonly EWMA_ALPHA_NEW=40      # integer percent weight of the new sample (0.4)
 readonly EWMA_ALPHA_OLD=60      # integer percent weight of the prior value (0.6)
-readonly REWEIGHT_THRESHOLD=15  # percent change required before commit + reload
+readonly REWEIGHT_THRESHOLD=15  # percent change required before commit + ifup reapply
 readonly WEIGHT_MAX=1000        # self-imposed clamp; mwan3 documents no hard max
 readonly PROBE_DURATION=8       # seconds of download per probe
 readonly PROBE_CONCURRENT=2     # parallel streams within a single probe

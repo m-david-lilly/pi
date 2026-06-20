@@ -3,6 +3,34 @@
 End-to-end build guide from a bare Raspberry Pi 5 to a working dual-WAN router with
 DNS filtering and an on-demand Surfshark WireGuard VPN.
 
+> ## ⚠️ AS-BUILT vs. this runbook (read first)
+>
+> This runbook captures the **original design**. The router was actually built and
+> proven on hardware (OpenWrt 25.12.4, 2026-06-20) with several **deliberate
+> deviations** — where the body below disagrees with this list, **the as-built
+> facts win** (and the relevant phases carry correction callouts):
+>
+> - **Topology inverted:** onboard `eth0` = LAN/management (`br-lan`,
+>   192.168.1.1/24, NOT renumbered); **both** USB RTL8153 NICs = the WANs
+>   (`uwan1`, `uwan2`). The body's "WAN1 on onboard GbE / LAN on USB" was dropped.
+> - **Device names are `uwan1`/`uwan2`**, NOT `wan2dev`/`landev`/`*dev` — a name
+>   ending in `dev` breaks mwan3 2.12.0's route-device regex (Phase 2.4 callout).
+>   The `wan2dev`/`landev` strings in the body are retained only as the broken
+>   example.
+> - **Rename is via a hotplug rule** (`config/hotplug/05-rename-wan-by-mac`), NOT
+>   the `config device` MAC alias (netifd ignores it for these NICs).
+> - **Distinct WAN interface metrics** (wan1=10, wan2=20); **DoH dual-upstream**
+>   (https-dns-proxy 5053+5054) auto-wiring dnsmasq + force-DNS/DoT; **IP-literal
+>   NTP first** (cold-boot deadlock fix); **`coreutils-timeout` required**;
+>   **weights reapplied via `mwan3 ifup`**, not `reload`.
+> - **One-shot rebuild:** `scripts/bringup.sh` applies the whole as-built stack
+>   idempotently (does NOT renumber). Prefer it over hand-running Phases 2–6.
+> - **Downstream WiFi** is a NETGEAR Orbi MR60 in NAT mode (LAN 10.0.0.0/24); the
+>   Pi's own radio is disabled.
+>
+> See `docs/reference/{architecture,load-balancing}.md` and `docs/planning/requirements.md`
+> for the reconciled as-built design.
+
 ## Conventions
 
 - **Placeholders** look like `<THIS>`. Replace every one before running the command.
@@ -720,6 +748,11 @@ DoH proxy). If it fails, revert `noresolv` and re-check the proxy port.
 > Verified: set clock to 2024, reboot, it self-corrects to real time. (`fake-hwclock` is
 > NOT in the 25.12.4 repo; the IP-literal NTP fix is the durable mitigation and is
 > independently sufficient.)
+>
+> **Cosmetic — timezone is UTC.** As-built `system.timezone='GMT0'` /
+> `zonename='UTC'` (stock default), so logs and `date` show UTC, not the
+> operator's local time. Harmless (NTP keeps absolute time correct); set
+> `system.timezone`/`zonename` to the local zone if local-time logs are wanted.
 
 ### 5.6 Daily feed refresh
 

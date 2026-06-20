@@ -60,52 +60,66 @@ balancing.**
 ## 2. Interface naming and the MAC-pinning prerequisite
 
 USB-Ethernet adapter enumeration order is **not** guaranteed across reboots —
-`eth1`/`eth2` can swap. If that happens, mwan3 members track the wrong physical
-uplink, silently corrupting weighting and failover. This topology uses **two**
-RTL8153 USB adapters (WAN2 and LAN); **both** can be reassigned at boot, so
-**both** must be pinned. The onboard GbE (`eth0`) is fixed and needs no pin.
-**Pin both USB interfaces by MAC address in `/etc/config/network` before
-configuring mwan3.**
+`eth1`/`eth2` can swap (and did, on hardware). If that happens, mwan3 members
+track the wrong physical uplink, silently corrupting weighting and failover.
+**As-built, BOTH WANs are RTL8153 USB adapters** (`uwan1`, `uwan2`); the onboard
+GbE (`eth0` → `br-lan`) is LAN/management and needs no pin.
 
-Topology used in this doc (matches the hardware research recommendation):
+Topology used in this doc (AS-BUILT — note the original design put WAN1 on the
+onboard port; that was inverted for management stability):
 
-| Logical | Physical | OpenWrt iface | netifd L3 device | Role |
+| Logical | Physical | OpenWrt iface | netifd device | Role |
 |---|---|---|---|---|
-| WAN1 | Onboard GbE (RP1, dedicated lane) | `wan` | `eth0` | Primary uplink |
-| WAN2 | USB3 GbE adapter (RTL8153) | `wanb` | `eth1` | Second uplink |
-| LAN | USB3 GbE adapter (RTL8153) → switch | `lan` | `eth2` | LAN |
+| LAN / mgmt | Onboard GbE (RP1, dedicated lane) | `lan` | `eth0`/`br-lan` | 192.168.1.1/24 |
+| WAN1 | USB3 GbE adapter #1 (RTL8153) | `wan1` (metric 10) | `uwan1` | First uplink |
+| WAN2 | USB3 GbE adapter #2 (RTL8153) | `wan2` (metric 20) | `uwan2` | Second uplink |
 
-Example MAC pin (replace placeholder MACs with the real adapter addresses from
-`ip link` / `dmesg`):
+**Two as-built facts that the original design got wrong (both proven on hardware):**
 
-```text
-config device
-        option name 'eth1'
-        option macaddr 'AA:BB:CC:DD:EE:01'   # WAN2 USB adapter — PLACEHOLDER
+1. **Pin by HOTPLUG rule, NOT `config device`.** netifd does NOT honor the
+   `/etc/config/network` `config device` MAC alias for these RTL8153 USB NICs —
+   the rename never fired on reload/restart/cold-boot (carrier-independent; an
+   earlier "rename fires on carrier" theory was falsified). The working mechanism
+   is `/etc/hotplug.d/net/05-rename-wan-by-mac` (in repo:
+   `config/hotplug/05-rename-wan-by-mac`), which renames each NIC by MAC at the
+   hotplug `add` event, before netifd/mwan3 bind.
 
-config device
-        option name 'eth2'
-        option macaddr 'AA:BB:CC:DD:EE:02'   # LAN  USB adapter — PLACEHOLDER
-```
+2. **Device names MUST NOT end in `dev`.** mwan3 2.12.0's `mwan3_route_line_dev()`
+   extracts a route's device with a greedy `sed -ne "s/.*dev \([^ ]*\).*/\1/p"`,
+   so a name like `wan1dev` is mis-parsed as the next token (`proto`) and the
+   per-WAN default route is silently dropped from tables 1/2 → marked LAN traffic
+   gets "Network unreachable". Hence `uwan1`/`uwan2`, never `wan1dev`/`landev`.
+
+**Distinct interface metrics are also load-bearing:** `network.wan1.metric=10`,
+`network.wan2.metric=20`. Without distinct metrics only one DHCP default route
+lands in the main table and the other WAN flaps offline (proven on hardware).
+This is the *network-interface* metric layer — separate from mwan3 *member*
+metrics (§3), which stay equal for active-active balancing.
 
 Resolve the live L3 device for a logical WAN at runtime with:
 
 ```sh
-ubus call network.interface.wan  status | jsonfilter -e '@.l3_device'    # -> eth0
-ubus call network.interface.wanb status | jsonfilter -e '@.l3_device'    # -> eth1
+ubus call network.interface.wan1 status | jsonfilter -e '@.l3_device'    # -> uwan1
+ubus call network.interface.wan2 status | jsonfilter -e '@.l3_device'    # -> uwan2
 ```
 
 The healthcheck script (§5) resolves devices this way rather than hard-coding
-`ethN`, so it survives any reordering that slips past the MAC pin.
+names, so it survives any reordering that slips past the rename.
 
 ---
 
 ## 3. mwan3 configuration model — 2 weighted WANs, active-active
 
-Design choice: **both members share the same `metric '1'`** so they
-load-balance, with `weight` driving the split. Equal metric also gives
-**mutual failover** for free — when one member is marked down, mwan3 removes it
-from the live pool and all new flows go to the survivor.
+Design choice: **both balanced members share the same mwan3 member `metric '1'`**
+so they load-balance, with `weight` driving the split. Equal member metric also
+gives **mutual failover** for free — when one member is marked down, mwan3 removes
+it from the live pool and all new flows go to the survivor.
+
+> **Don't confuse the two "metric" layers.** The mwan3 *member* metric here
+> (equal `1`) is mwan3's failover tier. It is SEPARATE from the *network-interface*
+> metric (`network.wan1.metric=10`/`wan2.metric=20`, distinct — see §2), which is
+> the kernel default-route metric that lets both DHCP defaults coexist in the main
+> table. Distinct interface metrics + equal member metrics is the correct combo.
 
 > **IPv4-only scope.** Every member, `track_ip`, and the `0.0.0.0/0` rule below
 > are **IPv4** (`option family 'ipv4'`). This config does **not** balance or fail
@@ -122,20 +136,25 @@ from the live pool and all new flows go to the survivor.
 
 ### 3.1 `/etc/config/mwan3` (full example)
 
+This is the AS-BUILT config (the repo's `config/mwan3`, abridged — full file
+has extra preset policies). Note `wan1`/`wan2` (not `wan`/`wanb`), and **3
+DISTINCT `track_ip` per WAN with `reliability '2'` (2-of-3)**.
+
 ```text
 config globals 'globals'
         option mmx_mask '0x3F00'         # mark bits reserved for mwan3 (default)
         # Do NOT widen this mask. pbr uses 0x00ff0000 (non-overlapping). See §8.
 
-#### Interfaces (tracking / liveness) ####
+#### Interfaces (tracking / liveness) — 3 DISTINCT track_ip each ####
 
-config interface 'wan'
+config interface 'wan1'
         option enabled '1'
         option family 'ipv4'
         list track_ip '1.1.1.1'          # Cloudflare anycast
         list track_ip '8.8.8.8'          # Google anycast
+        list track_ip '9.9.9.9'          # Quad9 anycast
         option track_method 'ping'
-        option reliability '2'           # need >=2 of the track_ip to reply
+        option reliability '2'           # 2-of-3 must reply (strictly below count)
         option count '1'
         option timeout '4'
         option interval '10'
@@ -147,11 +166,12 @@ config interface 'wan'
         list flush_conntrack 'disconnected'
         option initial_state 'online'
 
-config interface 'wanb'
+config interface 'wan2'
         option enabled '1'
         option family 'ipv4'
-        list track_ip '9.9.9.9'          # Quad9 anycast
+        list track_ip '1.0.0.1'          # Cloudflare anycast (secondary)
         list track_ip '8.8.4.4'          # Google anycast (secondary)
+        list track_ip '149.112.112.112'  # Quad9 anycast (secondary)
         option track_method 'ping'
         option reliability '2'
         option count '1'
@@ -165,36 +185,41 @@ config interface 'wanb'
         list flush_conntrack 'disconnected'
         option initial_state 'online'
 
-#### Members (metric + weight) ####
+#### Members (member metric + weight) ####
 # Naming convention: <iface>_m<metric>_w<weight> encodes the SEED weight only; the
-# healthcheck overwrites the live weight at runtime, so the name does not track it.
-# Equal metric => balance. Seed weight 1/1 (= 50/50) until the first probe runs.
+# healthcheck overwrites the live weight of wan1_m1_w3 / wan2_m1_w3 at runtime.
+# Equal member metric => balance. Seed weight 3/3 (= 50/50) until the first probe.
 
-config member 'wan_m1_w1'
-        option interface 'wan'
+config member 'wan1_m1_w3'
+        option interface 'wan1'
         option metric '1'
-        option weight '1'
+        option weight '3'
 
-config member 'wanb_m1_w1'
-        option interface 'wanb'
+config member 'wan2_m1_w3'
+        option interface 'wan2'
         option metric '1'
-        option weight '1'
+        option weight '3'
 
 #### Policy ####
 
 config policy 'balanced'
-        list use_member 'wan_m1_w1'
-        list use_member 'wanb_m1_w1'
+        list use_member 'wan1_m1_w3'
+        list use_member 'wan2_m1_w3'
         option last_resort 'unreachable'   # if BOTH down: reject, don't leak
 
 #### Rules (top-to-bottom, first match wins) ####
 
-config rule 'balanced_rule'
+config rule 'default_rule_v4'
         option dest_ip '0.0.0.0/0'
         option proto 'all'
         option use_policy 'balanced'
-        option sticky '0'                  # see §3.3 re: source-IP affinity
+        option family 'ipv4'
 ```
+
+> The repo also ships inert preset policies (`wan1_only`, `wan2_only`,
+> `wan1_wan2`, `wan2_wan1`) and a `sticky '1'` rule for dest-port 443 — swap a
+> preset into a rule's `use_policy` to change routing mode. They consume nothing
+> while unreferenced.
 
 Key option reference:
 
@@ -204,14 +229,13 @@ Key option reference:
   resolver outage cannot flap both links simultaneously.
 - **`reliability`** — minimum number of `track_ip` hosts that must reply to count
   a test as up. **Must be `<=` the number of `track_ip` entries**, or the
-  interface *never* comes up. We set `2` with two `track_ip`s — but note this is
-  the *strictest* possible value: `reliability == track_ip count` is AND logic, so
-  a single track target's third-party outage (e.g. an anycast PoP problem) marks
-  an otherwise-healthy WAN **down** and triggers failover. If you want tolerance
-  for one target flapping, either drop to `reliability '1'` (either target up ⇒
-  WAN up) or keep `reliability '2'` and add a **third** `track_ip` (2-of-3). The
-  2-of-2 here deliberately favors false-down (fail fast to the survivor) over
-  false-up; choose per how independent your track targets really are.
+  interface *never* comes up; and per FR-H1 it MUST be strictly **below** the
+  count so a single target's third-party outage (e.g. an anycast PoP problem)
+  doesn't flap an otherwise-healthy WAN down. **As-built: `reliability '2'` with
+  3 DISTINCT track_ip per WAN (2-of-3)** — loss of any one target is tolerated,
+  loss of two trips failover. The per-WAN target sets are distinct (wan1:
+  1.1.1.1/8.8.8.8/9.9.9.9; wan2: 1.0.0.1/8.8.4.4/149.112.112.112) so a single
+  resolver outage can't flap both links at once.
 - **`down` / `up`** — consecutive failed/good tests before state flips. `3` with
   `interval 10` ⇒ ~30 s to declare a WAN dead, ~30 s to bring it back.
 - **`flush_conntrack` (list: `ifdown`, `disconnected`)** — when a WAN drops,
@@ -266,47 +290,45 @@ Key option reference:
 ### 4.1 Applying a new weight (what the healthcheck does)
 
 ```sh
-uci set mwan3.wan_m1_w1.weight='6'
-uci set mwan3.wanb_m1_w1.weight='4'
+uci set mwan3.wan1_m1_w3.weight='1000'
+uci set mwan3.wan2_m1_w3.weight='500'
 uci commit mwan3
-mwan3 restart           # rebuilds rules/routes from config
+mwan3 ifup wan1         # per changed interface — re-reads the new weight
+mwan3 ifup wan2         # (only ifup the interfaces whose weight actually changed)
 ```
 
-> **`mwan3 restart` is disruptive.** It tears down and rebuilds all ip rules and
-> routing tables; in-flight connections can hiccup at the moment of reload. We
-> therefore only `commit + restart` when a weight has **actually changed beyond
-> a threshold** (§5.4), not on every cron tick.
+> **Use `mwan3 ifup <iface>`, NOT `mwan3 reload` or `mwan3 restart` (PROVEN on
+> mwan3 2.12.0, 2026-06-20).**
 >
-> **A weight reload does NOT strand in-flight flows.** `mwan3 restart`
-> re-applies rules and routing tables but does **not** itself fire the
-> `flush_conntrack 'ifdown'`/`'disconnected'` hooks — those fire only on
-> tracking-state transitions (a WAN actually going down/up). Existing flows keep
-> their connmark, so they continue egressing the WAN they were pinned to; only
-> *new* flows are split by the new weights. Conntrack is flushed (and flows
-> re-balanced) only on a genuine link-down event, not on a weight change.
+> - **`mwan3 reload` does NOT re-evaluate member weights.** Verified on hardware:
+>   change a weight, `uci commit`, `mwan3 reload` → `mwan3 policies` still shows
+>   the OLD split ratio. `reload` silently commits weights that never reach the
+>   live traffic split. Do not use it for weight changes.
+> - **`mwan3 restart` works but is forbidden here (FR-H13).** It tears down and
+>   rebuilds ALL ip rules — including the VPN tunnel's WAN pin — so it blips the
+>   tunnel. Acceptable only when the VPN is off, but the script must not assume
+>   that.
+> - **`mwan3 ifup <iface>` is the mechanism.** It re-reads that interface's member
+>   weight and rebuilds its policy share without touching the other WAN's ip
+>   rules. Verified: weights 1000/397 → set wan2=1000 → `mwan3 ifup wan2` → live
+>   split moved 71/28 → 50/50.
 >
-> Note this rests on `restart` rebuilding the mark rules *without* clearing the
-> saved connmarks already in the conntrack table — upstream mwan3 docs state
-> neither that `restart`/`stop` flushes conntrack nor that it preserves it, so it
-> is build-dependent. **Verify on the running build:** open a long-lived flow,
-> run a no-op `commit + mwan3 restart`, and confirm via `conntrack -L` that the
-> flow keeps its mark/route. If your build *does* drop marks on restart, prefer
-> the §4.2 `ifdown`/`ifup` path or a verified `mwan3 reload` for weight changes.
->
-> **`mwan3 reload`** re-reads config and re-applies rules without the full
-> service teardown that `restart` performs, so for a weight-only change it is the
-> less disruptive choice **if** the installed mwan3 build's `reload` re-evaluates
-> member weights (verify on the running build with `mwan3 reload` followed by
-> `mwan3 policies`). This doc uses `restart` as the conservative default; switch
-> to `reload` once verified.
+> **Cost:** the as-built mwan3 config sets `flush_conntrack 'ifdown'`/
+> `'disconnected'`, and `mwan3 ifup` of an already-up interface cycles it
+> down/up, so it DOES flush that WAN's conntrack — in-flight flows on the
+> reweighted WAN reset. This is the accepted tradeoff for a *real* reweight; the
+> §5.4 >15% threshold keeps it rare (only material capacity changes), and only
+> the changed interface is cycled. `wan-weight.sh` guards each `mwan3 ifup` with
+> `|| logger` so a benign non-zero return (RTNETLINK "File exists" route noise)
+> under `set -eu` can't abort the loop.
 
 ### 4.2 Liveness marking (prefer over full restart)
 
 To take a WAN out of / back into rotation without rebuilding everything:
 
 ```sh
-mwan3 ifdown wanb       # remove wanb from the live pool
-mwan3 ifup   wanb       # restore it
+mwan3 ifdown wan2       # remove wan2 from the live pool
+mwan3 ifup   wan2       # restore it
 ```
 
 These are less disruptive than `restart`. In normal operation **mwan3track owns
@@ -381,8 +403,8 @@ control:
 plumbing):
 
 ```sh
-# librespeed measures within wanb's routing table:
-mwan3 use wanb librespeed-cli --no-upload --duration 8 --concurrent 2 --json
+# librespeed measures within wan2's routing table:
+mwan3 use wan2 librespeed-cli --no-upload --duration 8 --concurrent 2 --json
 ```
 
 **Tool: `librespeed-cli`** (OpenWrt package `librespeed-cli`; verify
@@ -397,7 +419,7 @@ won't do this). `--interface 'if!ethN'` binds to the device and reports the
 measured rate plus the local IP the kernel selected for that device:
 
 ```sh
-dev=$(ubus call network.interface.wanb status | jsonfilter -e '@.l3_device')   # -> eth1
+dev=$(ubus call network.interface.wan2 status | jsonfilter -e '@.l3_device')   # -> uwan2
 curl --interface "if!$dev" -o /dev/null \
      --limit-rate 80M \
      -w '%{speed_download} %{local_ip}\n' \
@@ -408,12 +430,12 @@ curl --interface "if!$dev" -o /dev/null \
 probe left the intended WAN:
 
 ```sh
-WAN_IP=$(ubus call network.interface.wanb status | jsonfilter -e '@["ipv4-address"][0].address')
+WAN_IP=$(ubus call network.interface.wan2 status | jsonfilter -e '@["ipv4-address"][0].address')
 
 # Independent egress cross-check: a device-bound curl reports %{local_ip}.
 # If that local IP != WAN_IP, the device-bound path and the WAN's assigned IP
 # disagree -> DISCARD the sample (mis-bound or stale netifd state).
-got_ip=$(curl --interface "if!$(ubus call network.interface.wanb status \
+got_ip=$(curl --interface "if!$(ubus call network.interface.wan2 status \
          | jsonfilter -e '@.l3_device')" -s -o /dev/null \
          -w '%{local_ip}' https://<fast-cdn>/<known-large-file>)
 [ "$got_ip" = "$WAN_IP" ] || echo "DISCARD: probe egress IP $got_ip != $WAN_IP"
@@ -469,17 +491,14 @@ the script relied on is still correct.
   ≈ `900 Mbit/s × 8 s / 8 ≈ ~0.9 GB per WAN per run`. Serialized across 2 WANs,
   48 runs/day ⇒ **~86 GB/day total**. Fine on unmetered wired links; **ruinous
   on metered** — see the metered-uplink guard below.
-- **Serialize the two WAN probes** — never run both concurrently. Per the §2
-  topology the probed pair is WAN1 (**onboard** GbE) and WAN2 (**USB3** NIC);
-  on the Pi 5 *both* the onboard GbE and the USB3 ports hang off the RP1
-  southbridge, which funnels to the BCM2712 over a single shared PCIe link. So
-  concurrent WAN1+WAN2 probes contend at that RP1 uplink and on the CPU softirq
-  budget, throttle each other, and report falsely low capacity. (The "two USB
-  NICs" are WAN2 and LAN — but LAN is not probed, so the contention that matters
-  here is onboard-vs-USB through RP1, not USB-vs-USB. Exact RP1 uplink bandwidth
-  is board-revision-dependent — verify against current Pi 5 hardware docs rather
-  than assuming a fixed figure.) Probe WAN1, parse, then
-  probe WAN2.
+- **Serialize the two WAN probes** — never run both concurrently. As-built both
+  WANs (`uwan1`/`uwan2`) are USB3 NICs on the two independent 5 Gbps xHCI
+  controllers in RP1; the controllers don't contend with each other, but both
+  funnel to the BCM2712 over RP1's single shared PCIe x4 uplink, and both probes
+  burn the CPU softirq budget. Concurrent probes therefore throttle each other
+  and report falsely low capacity. Probe WAN1, parse, then probe WAN2. (Exact RP1
+  uplink bandwidth is board-revision-dependent, but it has ample headroom for two
+  gigabit WANs — the binding constraint is softirq/CPU, not the bus.)
 - **Skip dead links.** If `mwan3 interfaces` reports a WAN offline, don't probe
   it — leave its weight as-is (mwan3 has already removed it from the pool).
 - **Metered uplinks:** stretch the cadence (2–4 h) or downgrade that WAN to a
@@ -488,8 +507,18 @@ the script relied on is still correct.
   completeness.)
 - **EWMA smoothing:** smooth measurements so one bad sample doesn't slam the
   weights: `new = 0.6*old + 0.4*measured`, persisted in a state file.
-- **Threshold the reload:** only `commit + mwan3 restart` when a smoothed weight
-  changed beyond ~15 %, to avoid churning routing tables every tick (§4.1).
+- **Threshold the reapply:** only `commit + mwan3 ifup <changed iface>` when a
+  smoothed weight changed beyond ~15 %, to avoid churning routing tables (and
+  flushing conntrack) every tick (§4.1). NOT `reload` (no-op for weights) and NOT
+  `restart` (blips the VPN WAN pin).
+- **`coreutils-timeout` is REQUIRED.** busybox has no `timeout` applet, and the
+  probe is wrapped in `timeout` to kill a hung librespeed run. Without the
+  package every probe fails to launch and weighting silently never happens.
+- **librespeed upstream can be down.** `librespeed-cli` first fetches a server
+  list from `librespeed.org/backend-servers/servers.php`; that endpoint has been
+  observed returning malformed JSON (upstream outage), failing the probe. The
+  script then keeps existing weights / falls back to the seed 50/50 — graceful,
+  self-corrects on the next cron tick when the endpoint recovers.
 - **Don't measure through the tunnel.** Bind to the **physical** WAN device/IP,
   never the `wg` interface, or you'll measure tunnel throughput instead of raw
   uplink capacity.
@@ -517,7 +546,7 @@ STATE FILE: /etc/wan-weight/ewma.state  (one "wan <mbps>" line per member).
             costs only one un-smoothed run after each reboot; choose /etc only if
             you specifically want EWMA to persist across reboots.
 
-for each wan in {wan, wanb}:
+for each wan in {wan1, wan2}:
     if measured[wan] is NULL:          # mwan3 says down, or bind failed -> skip
         continue                       # leave existing weight AND its stale ewma
                                        # untouched. CAVEAT: a WAN that was fast,
@@ -533,7 +562,7 @@ for each wan in {wan, wanb}:
         ewma[wan] = measured[wan]      # first run: seed with the raw sample
 
 # GUARD: if no WAN produced a usable sample, do nothing this run.
-live_wans = [w for w in {wan, wanb} if measured[w] is not NULL]
+live_wans = [w for w in {wan1, wan2} if measured[w] is not NULL]
 if live_wans is empty:
     persist ewma; return              # both down/skipped -> leave weights as-is
 
@@ -556,7 +585,8 @@ for each live wan:
 
 if changed:
     uci commit mwan3
-    mwan3 restart
+    for iface in changed_ifaces:        # mwan3 ifup re-reads weights; reload does NOT (§4.1)
+        mwan3 ifup <iface>
 persist ewma to state file
 ```
 
@@ -566,14 +596,21 @@ WAN1 weight `1000`, WAN2 weight `round(1000*470/940)=500`. New flows split
 
 ### 5.5 Shell sketch (`/usr/bin/wan-weight.sh`)
 
+> **The production script is `scripts/wan-weight.sh` in the repo — ship that, not
+> this skeleton.** The real script implements everything below plus `flock`
+> locking, the EWMA state file (in `/etc/wan-weight/`), the `mwan3 ifup` reapply
+> (§4.1), the `|| logger` guard, and the `coreutils-timeout` wrapper. This
+> skeleton is kept only to illustrate the control flow.
+
 Skeleton only — production version adds locking (`flock`), the EWMA state file
-(see §5.4), the verified-bind check from §5.1, and a **hard probe timeout**.
-The skeleton calls `librespeed-cli` with no upper time bound; a stalled probe
-(dead CDN socket, half-open TCP) can hang indefinitely, and with the `*/30`
-cron and no `flock` the next tick stacks a second instance racing on `uci`.
-Production MUST wrap the probe in `timeout` (e.g. `timeout 30 mwan3 use … `) so
-a hung probe is killed well inside the cron interval, and MUST take the `flock`
-before touching `uci`.
+(see §5.4), the verified-bind check from §5.1, and a **hard probe timeout**
+(`timeout`, from the `coreutils-timeout` package — busybox has none). The
+skeleton calls `librespeed-cli` with no upper time bound; a stalled probe (dead
+CDN socket, half-open TCP) can hang indefinitely, and with the `*/30` cron and no
+`flock` the next tick stacks a second instance racing on `uci`. Production MUST
+wrap the probe in `timeout` (e.g. `timeout 30 mwan3 use … `) so a hung probe is
+killed well inside the cron interval, and MUST take the `flock` before touching
+`uci`.
 
 > **The skeleton's `new_w` is a placeholder, NOT the §5.4 mapping.** Below,
 > `new_w` is computed as the rounded raw Mbps (clamped to `[1, WMAX]`). This is a
@@ -593,8 +630,8 @@ set -eu
 TAG=wan-weight
 WMAX=1000
 
-# logical mwan3 iface  ->  member section name
-WANS="wan:wan_m1_w1 wanb:wanb_m1_w1"
+# logical mwan3 iface  ->  member section name (as-built names)
+WANS="wan1:wan1_m1_w3 wan2:wan2_m1_w3"
 
 is_up() {                      # read mwan3's authoritative state; never set it
         mwan3 interfaces | grep -qE "interface $1 is online"
@@ -653,8 +690,10 @@ done
 
 if [ "$changed" = 1 ]; then
         uci commit mwan3
-        mwan3 restart
-        logger -t "$TAG" "weights committed; mwan3 restarted"
+        # Reapply via `mwan3 ifup` per changed iface — reload is a no-op for
+        # weights, restart blips the VPN (§4.1). Real script tracks changed_ifaces.
+        for iface in $changed_ifaces; do mwan3 ifup "$iface"; done
+        logger -t "$TAG" "weights committed; reapplied via ifup"
 fi
 ```
 
@@ -689,6 +728,9 @@ status` and only ever writes `weight`. It must never call `mwan3 ifup/ifdown` to
   `/etc/init.d/mwan3 enable && /etc/init.d/mwan3 start` (then confirm with
   `mwan3 status`).
 - `librespeed-cli` (primary probe), optionally `curl` (fallback probe)
+- **`coreutils-timeout`** — REQUIRED. busybox has no `timeout` applet, and
+  `wan-weight.sh` wraps every probe in `timeout`. Without it, every probe fails
+  to launch and capacity weighting silently never happens (proven on hardware).
 - `jsonfilter` (in base), `conntrack` (for conntrack flushing/inspection; the
   package is `conntrack`, not `conntrack-tools`, on 25.12.x)
 - USB NIC driver baked into the image: `kmod-usb-net-rtl8152` + `r8152-firmware`
@@ -737,7 +779,7 @@ cleanly. Summarized here; full detail is in the VPN/firewall docs.
 
 1. `ip link` / `dmesg` confirm the USB NIC chipset is RTL8153 (not a counterfeit
    2.5G variant needing a different kmod), and MAC pins hold across a reboot.
-2. `mwan3 interfaces` shows both `wan` and `wanb` **online**.
+2. `mwan3 interfaces` shows both `wan1` and `wan2` **online**.
 3. `mwan3 policies` shows the `balanced` policy with a non-zero % to each member.
 4. Unplug WAN1; within ~30 s `mwan3 interfaces` shows it offline, conntrack is
    flushed, and traffic continues over WAN2. Re-plug; it returns within ~30 s.

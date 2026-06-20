@@ -6,10 +6,14 @@
 # the full stack — WANs, DNS/DoH, adblock, capacity weighting — idempotently.
 #
 # DELIBERATELY does NOT renumber the LAN. The Pi stays at 192.168.1.1. Renumbering
-# the LAN to 192.168.10.1 reproducibly stranded the box (LAN input filtered even on
-# clean boot, root cause unresolved 2026-06-20) — so a downstream NAT WiFi router
-# must instead use its OWN non-192.168.1.x LAN subnet; its WAN takes a DHCP lease
-# from this Pi on 192.168.1.x. See docs/runbooks/setup.md.
+# the LAN to 192.168.10.1 *appeared* to strand the box (IPv4 to the new subnet
+# filtered) across several attempts — but this was very likely the same Zscaler
+# artifact that blocks the admin Mac's IPv4 to RFC1918 (see docs/runbooks/setup.md
+# management-access gotcha), not a real Pi fault. It was never conclusively
+# root-caused, so renumber is treated as KNOWN-BAD here: a downstream NAT WiFi
+# router uses its OWN non-192.168.1.x LAN subnet; its WAN takes a DHCP lease from
+# this Pi on 192.168.1.x. The deployed downstream is a NETGEAR Orbi MR60 (NAT mode,
+# LAN 10.0.0.0/24) — no collision with the Pi's subnets.
 #
 # Assumes: config files staged alongside in the same dir, OR already on the Pi.
 # Re-runnable: every step is idempotent (uci set / enable / reload).
