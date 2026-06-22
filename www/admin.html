@@ -463,6 +463,13 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
     <div class="actions" id="vpn-actions"></div>
   </div>
 
+  <!-- Updates -->
+  <div class="card">
+    <h2>Package Updates <span class="badge" id="upd-badge"></span></h2>
+    <div id="upd-body"><span class="loading">Loading...</span></div>
+    <div class="actions" id="upd-actions"></div>
+  </div>
+
 </div>
 
 <div class="toast" id="toast"></div>
@@ -761,6 +768,7 @@ function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   fetchAll();
+  fetchUpdates();
   refreshTimer = setInterval(fetchAll, 10000);
 }
 
@@ -898,6 +906,147 @@ function fetchAll() {
     })
     .catch(function(err) {
       if (err.message !== 'auth') console.error('Fetch error:', err);
+    });
+}
+
+function renderUpdates(d) {
+  var el = document.getElementById('upd-body');
+  var badge = document.getElementById('upd-badge');
+  var actions = document.getElementById('upd-actions');
+  if (!d || d.count === undefined) {
+    badge.textContent = '?';
+    badge.className = 'badge badge-warn';
+    el.innerHTML = statRow('Status', 'Could not check for updates');
+    actions.innerHTML = '<button class="btn" onclick="checkUpdates()">Check now</button>';
+    return;
+  }
+  if (d.count === 0) {
+    badge.textContent = 'Up to date';
+    badge.className = 'badge badge-up';
+    el.innerHTML = statRow('Status', 'All packages are up to date', 'No upgradeable packages found after the last check.');
+    actions.innerHTML = '<button class="btn" onclick="checkUpdates()">Check again</button>';
+    return;
+  }
+  badge.textContent = d.count + ' available';
+  badge.className = 'badge badge-warn';
+  var html = statRow('Available', d.count + ' package(s)', 'Number of packages with a newer version available in the OpenWrt repository.');
+  if (d.packages && d.packages.length > 0) {
+    html += '<div style="margin-top:6px;margin-bottom:6px;display:flex;gap:8px;font-size:0.78rem">';
+    html += '<a href="#" style="color:var(--accent);text-decoration:none" onclick="toggleUpdatePkgs(true);return false">Select all</a>';
+    html += '<a href="#" style="color:var(--accent);text-decoration:none" onclick="toggleUpdatePkgs(false);return false">Select none</a>';
+    html += '<a href="#" style="color:var(--accent);text-decoration:none" onclick="selectNonReboot();return false">Skip reboot</a>';
+    html += '</div>';
+    html += '<div style="max-height:220px;overflow-y:auto" id="upd-list">';
+    for (var i = 0; i < d.packages.length; i++) {
+      var p = d.packages[i];
+      var ver = p.old_version ? p.old_version + ' → ' + p.new_version : p.new_version;
+      var hintTag = '';
+      if (p.hint === 'reboot') hintTag = ' <span style="font-size:0.68rem;padding:1px 5px;border-radius:99px;background:rgba(239,68,68,0.15);color:var(--red)">needs reboot</span>';
+      else if (p.hint === 'restart') hintTag = ' <span style="font-size:0.68rem;padding:1px 5px;border-radius:99px;background:rgba(245,158,11,0.15);color:var(--amber)">svc restart</span>';
+      html += '<label class="stat-row" style="cursor:pointer;gap:8px">' +
+              '<span style="display:flex;align-items:center;gap:6px;font-size:0.82rem">' +
+              '<input type="checkbox" checked class="upd-pkg-cb" data-pkg="' + p.name + '" data-hint="' + (p.hint || 'none') + '" ' +
+              'style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer" onchange="updateInstallBtn()">' +
+              p.name + hintTag + '</span>' +
+              '<span class="stat-value" style="font-size:0.78rem;font-family:var(--font-mono,monospace)">' + ver + '</span></label>';
+    }
+    html += '</div>';
+  }
+  el.innerHTML = html;
+  actions.innerHTML =
+    '<button class="btn" onclick="checkUpdates()">Check again</button>' +
+    '<button class="btn btn-green" id="upd-install-btn" onclick="confirmInstallSelected()">Install selected</button>';
+  updateInstallBtn();
+}
+
+function checkUpdates() {
+  var badge = document.getElementById('upd-badge');
+  badge.textContent = 'Checking...';
+  badge.className = 'badge badge-warn';
+  postAction('check_updates');
+  setTimeout(fetchUpdates, 3000);
+}
+
+function getSelectedPkgs() {
+  var cbs = document.querySelectorAll('.upd-pkg-cb:checked');
+  var pkgs = [];
+  for (var i = 0; i < cbs.length; i++) pkgs.push(cbs[i].getAttribute('data-pkg'));
+  return pkgs;
+}
+
+function selectedNeedReboot() {
+  var cbs = document.querySelectorAll('.upd-pkg-cb:checked');
+  for (var i = 0; i < cbs.length; i++) {
+    if (cbs[i].getAttribute('data-hint') === 'reboot') return true;
+  }
+  return false;
+}
+
+function updateInstallBtn() {
+  var btn = document.getElementById('upd-install-btn');
+  if (!btn) return;
+  var pkgs = getSelectedPkgs();
+  var reboot = selectedNeedReboot();
+  btn.disabled = pkgs.length === 0;
+  btn.textContent = pkgs.length === 0 ? 'Select packages'
+    : reboot ? 'Install ' + pkgs.length + ' + reboot'
+    : 'Install ' + pkgs.length + ' selected';
+}
+
+function toggleUpdatePkgs(state) {
+  var cbs = document.querySelectorAll('.upd-pkg-cb');
+  for (var i = 0; i < cbs.length; i++) cbs[i].checked = state;
+  updateInstallBtn();
+}
+
+function selectNonReboot() {
+  var cbs = document.querySelectorAll('.upd-pkg-cb');
+  for (var i = 0; i < cbs.length; i++) {
+    cbs[i].checked = cbs[i].getAttribute('data-hint') !== 'reboot';
+  }
+  updateInstallBtn();
+}
+
+function confirmInstallSelected() {
+  var pkgs = getSelectedPkgs();
+  if (pkgs.length === 0) return;
+  var reboot = selectedNeedReboot();
+  var msg = reboot
+    ? 'Install ' + pkgs.length + ' package(s) and reboot? The Pi will be offline for ~2 minutes.'
+    : 'Install ' + pkgs.length + ' package(s)? Services may briefly restart.';
+  if (confirm(msg)) {
+    var badge = document.getElementById('upd-badge');
+    badge.textContent = 'Installing...';
+    badge.className = 'badge badge-warn';
+    document.getElementById('upd-actions').innerHTML = '';
+    fetch(API, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'install_selected', packages: pkgs, reboot: reboot})
+    })
+      .then(function(r) {
+        if (handleAuthError(r)) throw new Error('auth');
+        return r.json();
+      })
+      .then(function(data) {
+        showToast(data.message || 'Done');
+        if (!reboot) setTimeout(fetchUpdates, 5000);
+      })
+      .catch(function(err) {
+        if (err.message !== 'auth') showToast('Error: ' + err.message);
+      });
+  }
+}
+
+function fetchUpdates() {
+  fetch(API + '?section=updates')
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(data) { renderUpdates(data); })
+    .catch(function(err) {
+      if (err.message !== 'auth') console.error('Updates fetch error:', err);
     });
 }
 

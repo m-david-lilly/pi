@@ -142,6 +142,63 @@ get_dns() {
 	EOF
 }
 
+get_updates() {
+	send_json
+	updates_json_raw
+}
+
+pkg_restart_hint() {
+	case "$1" in
+		kmod-*) echo "reboot" ;;
+		*)
+			has_ko=$(apk info -L "$1" 2>/dev/null | grep -cE '/lib/modules/|\.ko$|/boot/')
+			if [ "$has_ko" -gt 0 ]; then echo "reboot"; return; fi
+			has_lib=$(apk info -L "$1" 2>/dev/null | grep -cE '\.so')
+			if [ "$has_lib" -gt 0 ]; then echo "restart"; return; fi
+			echo "none"
+			;;
+	esac
+}
+
+updates_json_raw() {
+	sim=$(apk upgrade --simulate 2>&1)
+	count=$(echo "$sim" | grep -c 'Upgrading\|Installing')
+	needs_reboot=false
+	needs_restart=false
+	echo "$sim" | grep -E 'Upgrading|Installing' | while read -r line; do
+		action=$(echo "$line" | sed 's/^([0-9/]*) //' | cut -d' ' -f1)
+		pkg=$(echo "$line" | sed 's/^([0-9/]*) //' | cut -d' ' -f2)
+		if echo "$line" | grep -q 'Upgrading'; then
+			old_ver=$(echo "$line" | sed 's/.*(\(.*\) ->.*/\1/')
+			new_ver=$(echo "$line" | sed 's/.*-> \(.*\))/\1/')
+		else
+			old_ver=""
+			new_ver=$(echo "$line" | sed 's/.*(\(.*\))/\1/')
+		fi
+		hint=$(pkg_restart_hint "$pkg")
+		printf '%s\t%s\t%s\t%s\t%s\n' "$pkg" "$action" "$old_ver" "$new_ver" "$hint"
+	done | {
+		first=1
+		any_reboot=false
+		any_restart=false
+		list=""
+		while IFS='	' read -r pkg action old_ver new_ver hint; do
+			[ "$first" = 1 ] && first=0 || list="$list,"
+			list="$list{\"name\":\"$pkg\",\"action\":\"$action\",\"old_version\":\"$old_ver\",\"new_version\":\"$new_ver\",\"hint\":\"$hint\"}"
+			[ "$hint" = "reboot" ] && any_reboot=true
+			[ "$hint" = "restart" ] && any_restart=true
+		done
+		cat <<-EOF
+		{
+			"count": $count,
+			"needs_reboot": $any_reboot,
+			"needs_restart": $any_restart,
+			"packages": [$list]
+		}
+		EOF
+	}
+}
+
 SERVERS_DIR="/etc/wireguard/servers"
 
 # Parse a Surfshark .conf file → sets: _pubkey, _endpoint, _port
@@ -475,6 +532,49 @@ handle_post_with_data() {
 				echo '{"ok":false,"message":"wan-weight.sh not found"}'
 			fi
 			;;
+		check_updates)
+			send_json
+			apk update >/dev/null 2>&1
+			count=$(apk upgrade --simulate 2>&1 | grep -c 'Upgrading\|Installing')
+			echo "{\"ok\":true,\"message\":\"$count update(s) available\"}"
+			;;
+		install_updates)
+			send_json
+			apk update >/dev/null 2>&1
+			result=$(apk upgrade 2>&1)
+			count=$(echo "$result" | grep -c 'Upgrading\|Installing')
+			echo "{\"ok\":true,\"message\":\"$count package(s) updated\"}"
+			;;
+		install_selected)
+			send_json
+			pkgs_raw=$(echo "$POSTDATA" | jsonfilter -e '@.packages[*]' 2>/dev/null)
+			do_reboot=$(echo "$POSTDATA" | jsonfilter -e '@.reboot' 2>/dev/null)
+			pkgs_safe=""
+			for p in $pkgs_raw; do
+				is_safe_id "$p" || continue
+				pkgs_safe="$pkgs_safe $p"
+			done
+			if [ -z "$pkgs_safe" ]; then
+				echo '{"ok":false,"message":"no valid packages selected"}'
+				break
+			fi
+			apk update >/dev/null 2>&1
+			result=$(apk add --upgrade $pkgs_safe 2>&1)
+			count=$(echo "$result" | grep -c 'Upgrading\|Installing')
+			if [ "$do_reboot" = "true" ]; then
+				echo "{\"ok\":true,\"message\":\"$count package(s) updated. Rebooting...\"}"
+				sleep 2 && reboot &
+			else
+				echo "{\"ok\":true,\"message\":\"$count package(s) updated\"}"
+			fi
+			;;
+		install_updates_reboot)
+			send_json
+			apk update >/dev/null 2>&1
+			apk upgrade >/dev/null 2>&1
+			echo '{"ok":true,"message":"Updates installed. Rebooting..."}'
+			sleep 2 && reboot &
+			;;
 		reboot)
 			send_json
 			echo '{"ok":true,"message":"Rebooting in 2 seconds..."}'
@@ -632,6 +732,7 @@ case "$REQUEST_METHOD" in
 			adblock) get_adblock ;;
 			dns)     get_dns ;;
 			vpn)     get_vpn ;;
+			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;
 		esac
