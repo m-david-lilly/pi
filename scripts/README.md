@@ -17,8 +17,8 @@ the design rationale lives in the [reference docs](../docs/reference/).
 
 | File | Installs to | Purpose | Runbook phase |
 |---|---|---|---|
-| `www/admin.html` | `/www/admin.html` | Single-page admin dashboard (HTML/JS/CSS). Session-based login, auto-refresh, tooltips. | Phase 10 |
-| `www/cgi-bin/admin` | `/www/cgi-bin/admin` | Shell CGI backend. Serves JSON status (system, WAN, mwan3, adblock, DNS, VPN), handles actions (adblock toggle, VPN server switch, WAN re-weight, reboot), and manages auth (login/logout/change-password). | Phase 10 |
+| `www/admin.html` | `/www/admin.html` | Single-page admin dashboard (HTML/JS/CSS). Session-based login, auto-refresh, tooltips, per-WAN toggle switches, package update management. | Phase 10 |
+| `www/cgi-bin/admin` | `/www/cgi-bin/admin` | Shell CGI backend. Serves JSON status (system, WAN, mwan3, adblock, DNS, VPN, updates), handles actions (WAN enable/disable, adblock toggle, VPN server switch, WAN re-weight, package install, reboot), and manages auth (login/logout/change-password). OWASP-hardened: hashed credentials, brute-force protection, input sanitization, security headers. | Phase 10 |
 
 The dashboard CGI dynamically loads VPN servers from `/etc/wireguard/servers/*.conf` —
 drop a Surfshark WireGuard config file in and it appears in the UI. Auth credentials

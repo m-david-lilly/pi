@@ -43,7 +43,8 @@ reach the box, and what's left. **Read it before touching anything** — several
 | Firewall zones | `lan` (masq 0) · `wan` (holds BOTH `wan1`+`wan2`, masq 1) · `vpn` (wgvpn) |
 | DNS | dnsmasq + adblock (~561k domains, 9 feeds: oisd_big, certpl, hagezi multi-pro, adguard, adguard_tracking, stevenblack, firetv_tracking, smarttv_tracking, android_tracking) + **https-dns-proxy** DoH: Cloudflare `127.0.0.1#5053` + Google `#5054` |
 | VPN | Surfshark WireGuard `wgvpn` + pbr — **DEFAULT-OFF**, real creds injected. Multiple servers loaded dynamically from `/etc/wireguard/servers/*.conf` |
-| Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (`/etc/piadmin/credentials`, default `admin`/`admin`). HTTPS via local CA cert. |
+| Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (SHA-256 hashed credentials in `/etc/piadmin/credentials`). HTTPS via local CA cert. Features: system/WAN/mwan3/adblock/DNS/VPN panels, per-WAN toggle switches, package update management with selective install, reboot, change password. |
+| Streaming fix | HTTPS sticky timeout set to **4 hours** (14400s) in mwan3. Prevents streaming services (Netflix, etc.) from breaking when mwan3 assigns new connections to a different WAN mid-session. Per-source-IP stickiness — each device stays on the same WAN for all HTTPS traffic for 4 hours. |
 | TLS | Local CA ("Pi Home CA") → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). |
 | Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled**. |
 

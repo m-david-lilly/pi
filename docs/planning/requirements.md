@@ -81,7 +81,7 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords (MU
 | FR-W5 | Must | On the death of one WAN, all flows MUST automatically fail over to the surviving WAN; on recovery the dead WAN MUST rejoin the balancing pool. `last_resort 'unreachable'` MUST apply when both are down. |
 | FR-W6 | Must | `flush_conntrack` MUST be set on `ifdown`/`disconnected` so flows pinned to a dead WAN are flushed and re-balanced to the survivor rather than black-holed. |
 | FR-W7 | Should | mwan3 `mmx_mask` (default `0x3F00`) SHOULD be left at default and documented as reserved, so it never overlaps pbr's mark space (`0x00ff0000`) or any future SQM marks. |
-| FR-W8 | Could | A rule-level `sticky '1'` with `timeout '600'` COULD be added so a client's *successive* connections pin to one WAN (helps banking/HTTPS sites sensitive to mid-session IP changes). Off by default. |
+| FR-W8 | Must | **As-built: HTTPS rule has `sticky '1'` with `timeout '14400'` (4 hours).** Source-IP affinity across separate HTTPS connections. Prevents streaming services (Netflix, Disney+, etc.) from dropping mid-session when mwan3 assigns new connections to a different WAN — these services tie DRM sessions to the public IP. Each device independently pinned; both WANs still carry streaming load. |
 | FR-W9 | Won't | The router **WON'T** bond/aggregate the two WANs into one fat pipe. A single TCP stream rides one WAN; "100+100" yields ~100 Mbps single-stream, not 200. (See §6 Out of Scope.) |
 
 ### 3.3 Goal 1a — Speed-test / Liveness Healthcheck (FR-H)

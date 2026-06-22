@@ -270,17 +270,22 @@ Key option reference:
   weaken this — a single TCP flow still rides one WAN for its life.
 - **`option sticky '1'` (rule-level)** is a *different* feature:
   **source-IP affinity across separate connections**. It pins a client's
-  *subsequent* new connections to the same WAN within `option timeout` (default
-  600 s). This helps sites that dislike a client's IP changing between requests
-  (some banking/HTTPS portals). It is **optional** for this build. To enable:
+  *subsequent* new connections to the same WAN within `option timeout`.
+  **As-built: the HTTPS rule uses `sticky '1'` with `timeout '14400'`
+  (4 hours).** This prevents streaming services (Netflix, Disney+, etc.)
+  from dropping mid-session when mwan3 assigns a new HTTPS connection to
+  a different WAN — the DRM session is tied to the public IP, and a WAN
+  switch changes the IP. The 4-hour timeout covers even the longest movies.
+  Each device is independently sticky — both WANs still carry streaming
+  load across different devices.
 
   ```text
-  config rule 'balanced_rule'
-          option dest_ip '0.0.0.0/0'
-          option proto 'all'
+  config rule 'https'
+          option dest_port '443'
+          option proto 'tcp'
           option use_policy 'balanced'
           option sticky '1'
-          option timeout '600'
+          option timeout '14400'
   ```
 
 ---

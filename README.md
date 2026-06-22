@@ -11,7 +11,8 @@ DNS filtering, and capacity-based weighting are live; the VPN is staged but off.
 
 - **Dual-WAN load balancing + failover** (`mwan3`) — two USB3 gigabit uplinks,
   per-flow sticky balancing weighted by measured capacity, automatic failover when
-  a link dies. (Not bonding — a single connection rides one WAN.)
+  a link dies. 4-hour HTTPS sticky timeout prevents streaming (Netflix, etc.)
+  from breaking mid-session. (Not bonding — a single connection rides one WAN.)
 - **DNS filtering** — `dnsmasq` + `adblock` (~561k blocked domains, 9 feeds
   including hagezi multi-pro, adguard, stevenblack, and device-specific
   trackers) with encrypted DoH upstreams (`https-dns-proxy` → Cloudflare +
@@ -22,9 +23,10 @@ DNS filtering, and capacity-based weighting are live; the VPN is staged but off.
   **off by default**. Multiple server locations (drop a `.conf` file in
   `/etc/wireguard/servers/` and it appears in the UI).
 - **Admin dashboard** — lightweight single-page web UI at `/admin.html` with
-  session-based auth, real-time status for all subsystems, and controls for
-  adblock, VPN server selection, WAN re-weighting, and reboot. HTTPS with a
-  local CA certificate.
+  session-based auth (SHA-256 hashed credentials, brute-force protection,
+  security headers). Per-WAN toggle switches, VPN server selection, adblock
+  controls, package update management with selective install, reboot, and
+  change password. HTTPS with a local CA certificate.
 
 ## Topology
 
