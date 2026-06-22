@@ -366,8 +366,11 @@ wan_json_raw() {
 	[ -n "$ext_ip_wan1" ] && curl -s --max-time 3 "https://ipinfo.io/$ext_ip_wan1/org" > "$tmpdir/isp1" 2>/dev/null &
 	[ -n "$ext_ip_wan2" ] && curl -s --max-time 3 "https://ipinfo.io/$ext_ip_wan2/org" > "$tmpdir/isp2" 2>/dev/null &
 	wait
-	isp_wan1=$(cat "$tmpdir/isp1" 2>/dev/null | sed 's/^AS[0-9]* //')
-	isp_wan2=$(cat "$tmpdir/isp2" 2>/dev/null | sed 's/^AS[0-9]* //')
+	raw_isp1=$(cat "$tmpdir/isp1" 2>/dev/null)
+	raw_isp2=$(cat "$tmpdir/isp2" 2>/dev/null)
+	# Only use the response if it's a plain text ISP name (starts with AS), not a JSON error
+	case "$raw_isp1" in AS*) isp_wan1=$(echo "$raw_isp1" | sed 's/^AS[0-9]* //' | tr -d '\n"\\') ;; *) isp_wan1="" ;; esac
+	case "$raw_isp2" in AS*) isp_wan2=$(echo "$raw_isp2" | sed 's/^AS[0-9]* //' | tr -d '\n"\\') ;; *) isp_wan2="" ;; esac
 	rm -rf "$tmpdir"
 
 	printf '{'
