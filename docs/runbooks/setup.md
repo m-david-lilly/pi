@@ -783,7 +783,7 @@ nslookup ads.doubleclick.net 192.168.1.1    # expect NXDOMAIN
 > `adblock.global.adb_trigger='wan1 wan2'` and `adb_triggerdelay='20'` (the 20s lets NTP
 > correct the clock first). The init script honors this: when `adb_trigger` is set it
 > *skips* the boot run and instead fires on the interface coming up. Verified: cold boot
-> with a stale clock → clock self-corrects → adblock triggers on WAN-up → 463k domains
+> with a stale clock → clock self-corrects → adblock triggers on WAN-up → ~561k domains
 > loaded, no empty-list window beyond the trigger delay. Keep the 5am cron as the daily
 > refresh on top of this.
 >
@@ -1356,6 +1356,214 @@ mwan3 interfaces                               # both WANs online
 /etc/init.d/adblock status                     # adblock running
 /usr/bin/vpn-toggle.sh status                  # VPN still OFF by default
 ```
+
+---
+
+## Phase 9 — TLS certificate (local CA)
+
+uhttpd serves the admin dashboard and LuCI over HTTPS with a self-signed cert by
+default. Browsers show a security warning for self-signed certs. This phase creates
+a **local Certificate Authority (CA)**, signs a server cert for the Pi, and installs
+the CA on client devices to eliminate the warning.
+
+> **Prerequisites:** OpenSSL 3.x on the workstation (Windows: Git Bash ships it;
+> macOS/Linux: pre-installed). The Pi does not need OpenSSL — all key generation
+> happens on the workstation.
+
+### 9.1 — Generate the root CA (on your workstation)
+
+```bash
+mkdir -p .claude/.secrets/ca && cd .claude/.secrets/ca
+
+# Root CA key (4096-bit RSA) — keep this safe, never share it
+openssl genrsa -out ca.key 4096
+
+# Root CA certificate (10-year validity)
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -out ca.crt \
+  -subj "/C=US/ST=Home/O=Pi Home Network/CN=Pi Home CA"
+```
+
+### 9.2 — Generate and sign the server certificate
+
+```bash
+# Server key (2048-bit is fine for a LAN device)
+openssl genrsa -out server.key 2048
+
+# Certificate signing request
+openssl req -new -key server.key -out server.csr \
+  -subj "/C=US/ST=Home/O=Pi Router/CN=192.168.1.1"
+
+# Extensions file — defines SANs (Subject Alternative Names)
+cat > server.ext << 'EOF'
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=@alt_names
+
+[alt_names]
+IP.1=192.168.1.1
+DNS.1=openwrt.lan
+DNS.2=pi.lan
+EOF
+
+# Sign with the CA (825 days — within browser max-validity rules)
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out server.crt -days 825 -sha256 -extfile server.ext
+
+# Verify
+openssl x509 -in server.crt -noout -subject -dates -ext subjectAltName
+```
+
+### 9.3 — Install the server cert on the Pi
+
+```bash
+scp -O server.crt root@192.168.1.1:/etc/uhttpd.crt
+scp -O server.key root@192.168.1.1:/etc/uhttpd.key
+ssh root@192.168.1.1 "chmod 600 /etc/uhttpd.key && /etc/init.d/uhttpd restart"
+```
+
+uhttpd picks up the new cert/key from its default paths (`/etc/uhttpd.crt`,
+`/etc/uhttpd.key`) on restart. No UCI config change needed.
+
+### 9.4 — Install the CA on client devices
+
+The CA cert (`ca.crt`) must be trusted by each device that accesses the Pi's
+HTTPS interface. Install it **once** — it covers all future server certs signed
+by this CA (including renewals).
+
+**Windows:**
+1. Double-click `ca.crt`
+2. Click **Install Certificate...**
+3. Select **Local Machine** → Next
+4. Select **Place all certificates in the following store** → Browse →
+   **Trusted Root Certification Authorities** → OK → Next → Finish
+5. Restart Chrome/Edge
+
+**macOS:**
+1. Double-click `ca.crt` — it opens in Keychain Access
+2. Add to the **System** keychain
+3. Double-click the "Pi Home CA" entry → Trust → set **When using this
+   certificate** to **Always Trust** → close (authenticate)
+4. Restart Chrome/Safari
+
+**iOS:**
+1. AirDrop or email `ca.crt` to the device, tap to install the profile
+2. Settings → General → VPN & Device Management → install the profile
+3. Settings → General → About → Certificate Trust Settings → enable full
+   trust for "Pi Home CA"
+
+**Android:**
+1. Copy `ca.crt` to the device
+2. Settings → Security → Encryption & credentials → Install a certificate →
+   CA certificate → select `ca.crt`
+
+After installing, visit `https://192.168.1.1/admin.html` — the padlock should
+show green with no warnings.
+
+### 9.5 — Renewal
+
+The server cert expires after ~2 years (825 days). To renew, re-run steps 9.2
+and 9.3 with the same CA key/cert. Client devices do **not** need to re-install
+the CA — only the server cert changes.
+
+If the CA cert expires (after 10 years), regenerate both the CA and server cert
+and re-install the CA on all client devices.
+
+### 9.6 — Security notes
+
+- **`ca.key` is the crown jewel.** Anyone with this file can sign certs that
+  your devices will trust. Keep it in `.claude/.secrets/` (gitignored) or an
+  encrypted store. Do not commit it to git.
+- **`server.key`** is sensitive but device-scoped — it only matters if someone
+  is on your LAN impersonating the Pi's IP.
+- **`ca.crt`** is public — safe to share, email, AirDrop. It contains only the
+  public key.
+
+---
+
+## Phase 10 — Admin dashboard
+
+A lightweight single-page admin dashboard served from the Pi's existing uhttpd.
+No extra packages needed — it uses a shell CGI script backend and vanilla
+HTML/JS/CSS.
+
+The dashboard shows: system info, dual-WAN status (with external IPs and ISP
+names), real-time load-balancing flow counts, DNS adblock controls, DNS/DoH
+status, and WireGuard VPN with multi-server selection. VPN servers are loaded
+dynamically from `.conf` files in `/etc/wireguard/servers/`.
+
+### 10.1 — Deploy the dashboard files
+
+From the repo root on your workstation:
+
+```bash
+scp -O www/admin.html root@192.168.1.1:/www/admin.html
+scp -O www/cgi-bin/admin root@192.168.1.1:/www/cgi-bin/admin
+ssh root@192.168.1.1 "chmod +x /www/cgi-bin/admin"
+```
+
+The dashboard is now accessible at `http://192.168.1.1/admin.html` (or
+`https://` if you completed Phase 9).
+
+### 10.2 — Create the admin credentials
+
+The dashboard uses its own username/password, independent of the Pi's root
+account. Credentials are stored in a plaintext file on the Pi (permissions
+locked to root-only).
+
+```bash
+ssh root@192.168.1.1 "mkdir -p /etc/piadmin && \
+  printf 'admin:admin\n' > /etc/piadmin/credentials && \
+  chmod 600 /etc/piadmin/credentials"
+```
+
+This creates user `admin` with password `admin`. **Change the password
+immediately** via the dashboard's "Change Password" link in the header, or
+directly on the Pi:
+
+```bash
+ssh root@192.168.1.1 "printf 'admin:<NEW_PASSWORD>\n' > /etc/piadmin/credentials"
+```
+
+The credentials file format is `username:password` (one line). Sessions are
+stored in `/tmp/piadmin-sessions/` and expire after 24 hours.
+
+### 10.3 — Deploy VPN server configs
+
+Surfshark WireGuard `.conf` files are loaded dynamically from
+`/etc/wireguard/servers/`. Drop a new file and it appears in the dashboard
+automatically — no restart needed.
+
+```bash
+# Upload all .conf files from the secrets directory
+scp -O .claude/.secrets/*.conf root@192.168.1.1:/etc/wireguard/servers/
+ssh root@192.168.1.1 "chmod 600 /etc/wireguard/servers/*.conf"
+```
+
+The server ID and display name are derived from the filename (e.g.
+`us-phx.conf` → "Phoenix, US"). The CGI has a built-in name mapping for
+common Surfshark city codes; unknown codes fall back to a generated label.
+
+### 10.4 — Verify
+
+1. Open `https://192.168.1.1/admin.html` in a browser
+2. Sign in with `admin` / `admin` (or your changed password)
+3. Confirm all six panels load: System, WAN, mwan3, Adblock, DNS/DoH, VPN
+4. Test an action: click "Reload Lists" in the Adblock card
+5. Change the default password via "Change Password" in the header
+
+### 10.5 — Security notes
+
+- **Credentials are plaintext** in `/etc/piadmin/credentials`. This is
+  acceptable for a LAN-only device behind your router — the file is `chmod 600`
+  (root-only) and never committed to git. If you want hashed passwords, a
+  future enhancement could use `/etc/shadow`-style hashing.
+- **Sessions** are token files in `/tmp/piadmin-sessions/`. They survive uhttpd
+  restarts but are cleared on reboot (tmpfs). Max age is 24 hours.
+- **The dashboard is LAN-only** — uhttpd's `rfc1918_filter '1'` blocks access
+  from WAN-side IPs. Combined with TLS (Phase 9), this is safe for home use.
+- **Reboot button** has a browser `confirm()` dialog to prevent accidental use.
 
 ---
 

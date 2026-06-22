@@ -228,13 +228,183 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
   color: var(--green);
   font-weight: 500;
 }
+.has-tip {
+  cursor: help;
+  border-bottom: 1px dotted var(--text-dim);
+}
+.stat-row { position: relative; }
+.tip {
+  display: none;
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 4px;
+  padding: 6px 10px;
+  background: #252836;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  line-height: 1.4;
+  width: max-content;
+  max-width: 320px;
+  z-index: 50;
+  white-space: normal;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.stat-row:hover .tip { display: block; }
 @media (max-width: 600px) {
   body { padding: 12px; }
   .grid { grid-template-columns: 1fr; }
+  .tip { max-width: 260px; }
 }
+#login-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+#login-screen h1 { font-size: 1.4rem; margin-bottom: 24px; }
+#login-form {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 32px;
+  width: 100%;
+  max-width: 360px;
+}
+#login-form label {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  margin-top: 14px;
+}
+#login-form label:first-child { margin-top: 0; }
+#login-form input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  outline: none;
+}
+#login-form input:focus { border-color: var(--accent); }
+#login-btn {
+  width: 100%;
+  margin-top: 20px;
+  padding: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#login-btn:hover { opacity: 0.9; }
+#login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+#login-error {
+  color: var(--red);
+  font-size: 0.82rem;
+  margin-top: 10px;
+  display: none;
+}
+.pw-wrap {
+  position: relative;
+}
+.pw-wrap input { padding-right: 36px; }
+.pw-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  color: var(--text-dim);
+  font-size: 0;
+  line-height: 1;
+}
+.pw-toggle:hover { color: var(--text); }
+.pw-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#app { display: none; }
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.show { display: flex; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 32px;
+  width: 100%;
+  max-width: 380px;
+}
+.modal h3 { font-size: 1rem; margin-bottom: 16px; }
+.modal label {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  margin-top: 14px;
+}
+.modal label:first-of-type { margin-top: 0; }
+.modal input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  outline: none;
+}
+.modal input:focus { border-color: var(--accent); }
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.modal-msg {
+  font-size: 0.82rem;
+  margin-top: 10px;
+  display: none;
+}
+.modal-msg.err { color: var(--red); }
+.modal-msg.ok { color: var(--green); }
 </style>
 </head>
 <body>
+
+<div id="login-screen">
+  <h1>Pi Admin</h1>
+  <form id="login-form" onsubmit="doLogin(event)">
+    <label for="username">Username</label>
+    <input type="text" id="username" value="admin" autocomplete="username">
+    <label for="password">Password</label>
+    <div class="pw-wrap">
+      <input type="password" id="password" autocomplete="current-password" autofocus>
+      <button type="button" class="pw-toggle" onclick="togglePw(this)"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
+    </div>
+    <button type="submit" id="login-btn">Sign in</button>
+    <div id="login-error">Invalid username or password.</div>
+  </form>
+</div>
+
+<div id="app">
 
 <header>
   <h1>Pi Admin</h1>
@@ -242,6 +412,8 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
     <div id="header-host"></div>
     <div id="header-refresh">Auto-refresh: 10s</div>
     <a href="/cgi-bin/luci/" class="luci-link">OpenWrt LuCI</a>
+    <a href="#" class="luci-link" onclick="showPasswordModal()" style="margin-left:10px">Change Password</a>
+    <a href="#" class="luci-link" onclick="doLogout()" style="margin-left:10px;color:var(--red)">Sign out</a>
   </div>
 </header>
 
@@ -251,6 +423,9 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
   <div class="card">
     <h2>System <span class="badge badge-up" id="sys-badge"></span></h2>
     <div id="sys-body"><span class="loading">Loading...</span></div>
+    <div class="actions">
+      <button class="btn btn-red" onclick="confirmReboot()">Reboot</button>
+    </div>
   </div>
 
   <!-- WAN -->
@@ -292,6 +467,25 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 
 <div class="toast" id="toast"></div>
 
+<div class="modal-overlay" id="pw-modal" onclick="if(event.target===this)hidePasswordModal()">
+  <div class="modal">
+    <h3>Change Password</h3>
+    <label for="pw-current">Current Password</label>
+    <div class="pw-wrap"><input type="password" id="pw-current"><button type="button" class="pw-toggle" onclick="togglePw(this)"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+    <label for="pw-new">New Password</label>
+    <div class="pw-wrap"><input type="password" id="pw-new"><button type="button" class="pw-toggle" onclick="togglePw(this)"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+    <label for="pw-confirm">Confirm New Password</label>
+    <div class="pw-wrap"><input type="password" id="pw-confirm"><button type="button" class="pw-toggle" onclick="togglePw(this)"><svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+    <div class="modal-msg" id="pw-msg"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hidePasswordModal()">Cancel</button>
+      <button class="btn btn-green" id="pw-save-btn" onclick="doChangePassword()">Save</button>
+    </div>
+  </div>
+</div>
+
+</div><!-- #app -->
+
 <script>
 const API = '/cgi-bin/admin';
 let refreshTimer;
@@ -328,8 +522,10 @@ function barClass(p) {
   return 'bar-green';
 }
 
-function statRow(label, value) {
-  return '<div class="stat-row"><span class="stat-label">' + label + '</span><span class="stat-value">' + value + '</span></div>';
+function statRow(label, value, tip) {
+  var cls = tip ? 'stat-label has-tip' : 'stat-label';
+  var tipHtml = tip ? '<span class="tip">' + tip + '</span>' : '';
+  return '<div class="stat-row"><span class="' + cls + '">' + label + tipHtml + '</span><span class="stat-value">' + value + '</span></div>';
 }
 
 function showToast(msg) {
@@ -346,14 +542,14 @@ function renderSystem(d) {
   const memPct = pct(d.memory.total - d.memory.available, d.memory.total);
   const diskPct = pct(d.disk.used, d.disk.total);
   el.innerHTML =
-    statRow('Model', d.model) +
-    statRow('Hostname', d.hostname) +
-    statRow('Kernel', d.kernel) +
-    statRow('Uptime', formatUptime(d.uptime)) +
-    statRow('Load', formatLoad(d.load[0]) + ' / ' + formatLoad(d.load[1]) + ' / ' + formatLoad(d.load[2])) +
-    statRow('Memory', formatBytes(d.memory.total - d.memory.available) + ' / ' + formatBytes(d.memory.total) + ' (' + memPct + '%)') +
+    statRow('Model', d.model, 'The hardware model of the router.') +
+    statRow('Hostname', d.hostname, 'The network name of this device.') +
+    statRow('Kernel', d.kernel, 'Linux kernel version running on the Pi.') +
+    statRow('Uptime', formatUptime(d.uptime), 'Time since the last reboot.') +
+    statRow('Load', formatLoad(d.load[0]) + ' / ' + formatLoad(d.load[1]) + ' / ' + formatLoad(d.load[2]), 'CPU load averages over the last 1 / 5 / 15 minutes. Values above 1.0 per core mean the CPU is overloaded.') +
+    statRow('Memory', formatBytes(d.memory.total - d.memory.available) + ' / ' + formatBytes(d.memory.total) + ' (' + memPct + '%)', 'RAM in use vs total. High usage can slow routing performance.') +
     '<div class="bar-track"><div class="bar-fill ' + barClass(memPct) + '" style="width:' + memPct + '%"></div></div>' +
-    statRow('Disk', d.disk.used + ' / ' + d.disk.total + ' KB (' + diskPct + '%)') +
+    statRow('Disk', d.disk.used + ' / ' + d.disk.total + ' KB (' + diskPct + '%)', 'Overlay filesystem usage. This is where config changes and installed packages are stored.') +
     '<div class="bar-track"><div class="bar-fill ' + barClass(diskPct) + '" style="width:' + diskPct + '%"></div></div>';
   document.getElementById('header-host').textContent = d.hostname + ' — ' + d.model;
 }
@@ -366,14 +562,14 @@ function renderWan(d) {
     html += '<div class="wan-block">';
     html += '<div class="wan-header"><span class="dot ' + (w.up ? 'dot-green' : 'dot-red') + '"></span>' +
             name.toUpperCase() + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-dim)">(' + w.device + ')</span></div>';
-    html += statRow('Status', w.up ? 'Online' : 'Offline');
-    html += statRow('ISP', w.isp || '—');
-    html += statRow('Address', w.address || '—');
-    html += statRow('External IP', w.external_ip || '—');
-    html += statRow('Gateway', w.gateway || '—');
-    html += statRow('Uptime', formatUptime(w.uptime));
-    html += statRow('Metric', w.metric);
-    html += statRow('Traffic', formatBytes(w.rx_bytes) + ' rx / ' + formatBytes(w.tx_bytes) + ' tx');
+    html += statRow('Status', w.up ? 'Online' : 'Offline', 'Whether this WAN uplink is connected and passing traffic.');
+    html += statRow('ISP', w.isp || '—', 'The Internet Service Provider for this uplink, looked up from the public IP.');
+    html += statRow('Address', w.address || '—', 'The private IP assigned to this interface by the upstream router/modem via DHCP.');
+    html += statRow('External IP', w.external_ip || '—', 'The public IP address the internet sees for traffic on this uplink.');
+    html += statRow('Gateway', w.gateway || '—', 'The next-hop router (modem/ONT) that this uplink sends traffic through.');
+    html += statRow('Uptime', formatUptime(w.uptime), 'How long this interface has been connected since its last DHCP lease.');
+    html += statRow('Metric', w.metric, 'Route priority for this WAN. Lower metric = preferred route. WAN1 is 10, WAN2 is 20 — mwan3 overrides this for load balancing.');
+    html += statRow('Traffic', formatBytes(w.rx_bytes) + ' rx / ' + formatBytes(w.tx_bytes) + ' tx', 'Total bytes received (rx) and transmitted (tx) on this interface since boot.');
     html += '</div>';
   }
   el.innerHTML = html;
@@ -408,8 +604,8 @@ function renderMwan(d) {
               'wan2 ' + d.flows.wan2_pct + '%</div>';
     }
     html += '</div>';
-    html += statRow('WAN1 flows', d.flows.wan1);
-    html += statRow('WAN2 flows', d.flows.wan2);
+    html += statRow('WAN1 flows', d.flows.wan1, 'Number of active network connections (TCP/UDP) currently routed through WAN1.');
+    html += statRow('WAN2 flows', d.flows.wan2, 'Number of active network connections (TCP/UDP) currently routed through WAN2.');
     html += '</div>';
   } else if (d.policies && d.policies.ipv4 && d.policies.ipv4.balanced) {
     html += '<div style="margin-top:12px">';
@@ -437,10 +633,10 @@ function renderAdblock(d) {
   badge.textContent = enabled ? 'Active' : 'Disabled';
   badge.className = 'badge ' + (enabled ? 'badge-up' : 'badge-down');
   el.innerHTML =
-    statRow('Blocked domains', Number(d.blocked_domains).toLocaleString()) +
-    statRow('Active feeds', d.active_feeds || '—') +
-    statRow('DNS backend', d.dns_backend || '—') +
-    statRow('Last run', d.last_run || '—');
+    statRow('Blocked domains', Number(d.blocked_domains).toLocaleString(), 'Total number of ad/tracker/malware domains being blocked. DNS queries for these domains return NXDOMAIN (not found).') +
+    statRow('Active feeds', d.active_feeds || '—', 'The blocklists currently loaded. Each feed is a curated list of domains to block from different sources.') +
+    statRow('DNS backend', d.dns_backend || '—', 'The DNS resolver that adblock uses to serve blocked responses. dnsmasq handles all DNS queries for LAN clients.') +
+    statRow('Last run', d.last_run || '—', 'When the blocklists were last downloaded and applied. Lists refresh on WAN interface up and via cron.');
 
   const actions = document.getElementById('adb-actions');
   actions.innerHTML =
@@ -452,8 +648,8 @@ function renderAdblock(d) {
 
 function renderDns(d) {
   const el = document.getElementById('dns-body');
-  let html = statRow('DoH Proxy', d.doh_running ? 'Running (' + d.doh_instances + ' instances)' : 'Stopped');
-  html += statRow('No-resolv', d.noresolv === '1' ? 'Yes (DoH only)' : 'No');
+  let html = statRow('DoH Proxy', d.doh_running ? 'Running (' + d.doh_instances + ' instances)' : 'Stopped', 'DNS-over-HTTPS proxy (https-dns-proxy). Encrypts the router\'s upstream DNS queries so your ISP cannot see what domains you look up.');
+  html += statRow('No-resolv', d.noresolv === '1' ? 'Yes (DoH only)' : 'No', 'When enabled, dnsmasq ignores ISP-provided DNS servers and only uses the configured upstreams (the DoH proxies). Prevents DNS leaks to your ISP.');
   if (d.upstream_servers && d.upstream_servers.length) {
     html += '<div style="margin-top:10px"><span class="stat-label" style="font-size:0.82rem">Upstream servers</span>';
     html += '<ul class="server-list">';
@@ -484,9 +680,9 @@ function renderVpn(d) {
     activeLabel = d.servers[d.active_server].name;
   }
 
-  let html = statRow('Status', d.up ? 'Connected' : 'Disconnected') +
-    statRow('Server', activeLabel) +
-    statRow('PBR', d.pbr_enabled === '1' ? 'Enabled' : 'Disabled');
+  let html = statRow('Status', d.up ? 'Connected' : 'Disconnected', 'Whether the WireGuard VPN tunnel is currently up and has a valid handshake with the Surfshark server.') +
+    statRow('Server', activeLabel, 'The Surfshark VPN server this router is configured to connect through. Different servers give you different geographic exit points.') +
+    statRow('PBR', d.pbr_enabled === '1' ? 'Enabled' : 'Disabled', 'Policy-Based Routing. When enabled, steers selected traffic (by client IP, MAC, or destination) through the VPN tunnel instead of the regular WAN.');
 
   if (d.servers && Object.keys(d.servers).length > 0) {
     html += '<div class="server-list-vpn">';
@@ -537,9 +733,161 @@ function switchVpnServer(serverId) {
     });
 }
 
+// ── Auth ──────────────────────────────────────────────────────
+
+function togglePw(btn) {
+  var input = btn.parentElement.querySelector('input');
+  var show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  btn.innerHTML = show
+    ? '<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+}
+
+function getCookie(name) {
+  var m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+  return m ? m[1] : '';
+}
+
+function setCookie(name, val, maxAge) {
+  document.cookie = name + '=' + val + ';path=/;max-age=' + (maxAge || 3600) + ';SameSite=Strict';
+}
+
+function deleteCookie(name) {
+  document.cookie = name + '=;path=/;max-age=0';
+}
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  fetchAll();
+  refreshTimer = setInterval(fetchAll, 10000);
+}
+
+function showLogin() {
+  clearInterval(refreshTimer);
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('password').value = '';
+  document.getElementById('login-error').style.display = 'none';
+}
+
+function doLogin(e) {
+  e.preventDefault();
+  var user = document.getElementById('username').value;
+  var pass = document.getElementById('password').value;
+  var btn = document.getElementById('login-btn');
+  btn.disabled = true;
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'login', username: user, password: pass})
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        showApp();
+      } else {
+        document.getElementById('login-error').style.display = 'block';
+      }
+    })
+    .catch(function() {
+      document.getElementById('login-error').style.display = 'block';
+    })
+    .finally(function() {
+      btn.disabled = false;
+    });
+}
+
+function doLogout() {
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'logout'})
+  }).catch(function(){});
+  deleteCookie('sysauth');
+  showLogin();
+}
+
+function showPasswordModal() {
+  document.getElementById('pw-current').value = '';
+  document.getElementById('pw-new').value = '';
+  document.getElementById('pw-confirm').value = '';
+  var msg = document.getElementById('pw-msg');
+  msg.style.display = 'none';
+  msg.className = 'modal-msg';
+  document.getElementById('pw-modal').classList.add('show');
+  document.getElementById('pw-current').focus();
+}
+
+function hidePasswordModal() {
+  document.getElementById('pw-modal').classList.remove('show');
+}
+
+function doChangePassword() {
+  var cur = document.getElementById('pw-current').value;
+  var np = document.getElementById('pw-new').value;
+  var confirm = document.getElementById('pw-confirm').value;
+  var msg = document.getElementById('pw-msg');
+  var btn = document.getElementById('pw-save-btn');
+
+  if (!cur || !np || !confirm) {
+    msg.textContent = 'All fields are required.';
+    msg.className = 'modal-msg err';
+    msg.style.display = 'block';
+    return;
+  }
+  if (np !== confirm) {
+    msg.textContent = 'New passwords do not match.';
+    msg.className = 'modal-msg err';
+    msg.style.display = 'block';
+    return;
+  }
+  btn.disabled = true;
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'change_password', current_password: cur, new_password: np})
+  })
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(data) {
+      if (data.ok) {
+        msg.textContent = 'Password changed successfully.';
+        msg.className = 'modal-msg ok';
+        msg.style.display = 'block';
+        setTimeout(hidePasswordModal, 1500);
+      } else {
+        msg.textContent = data.message || 'Failed to change password.';
+        msg.className = 'modal-msg err';
+        msg.style.display = 'block';
+      }
+    })
+    .catch(function(err) {
+      if (err.message !== 'auth') {
+        msg.textContent = 'Error: ' + err.message;
+        msg.className = 'modal-msg err';
+        msg.style.display = 'block';
+      }
+    })
+    .finally(function() { btn.disabled = false; });
+}
+
+function handleAuthError(r) {
+  if (r.status === 401) { doLogout(); return true; }
+  return false;
+}
+
+// ── Data fetch ───────────────────────────────────────────────
+
 function fetchAll() {
   fetch(API + '?section=all')
-    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
     .then(function(data) {
       if (data.system)  renderSystem(data.system);
       if (data.wan)     renderWan(data.wan);
@@ -549,8 +897,14 @@ function fetchAll() {
       if (data.vpn)     renderVpn(data.vpn);
     })
     .catch(function(err) {
-      console.error('Fetch error:', err);
+      if (err.message !== 'auth') console.error('Fetch error:', err);
     });
+}
+
+function confirmReboot() {
+  if (confirm('Reboot the Pi? It will be offline for ~2 minutes.')) {
+    postAction('reboot');
+  }
 }
 
 function postAction(action) {
@@ -561,21 +915,30 @@ function postAction(action) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({action: action})
   })
-    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
     .then(function(data) {
       showToast(data.message || 'Done');
       setTimeout(fetchAll, 2000);
     })
     .catch(function(err) {
-      showToast('Error: ' + err.message);
+      if (err.message !== 'auth') showToast('Error: ' + err.message);
     })
     .finally(function() {
       btns.forEach(function(b) { b.disabled = false; });
     });
 }
 
-fetchAll();
-refreshTimer = setInterval(fetchAll, 10000);
+// ── Startup ──────────────────────────────────────────────────
+
+fetch(API + '?section=system')
+  .then(function(r) {
+    if (r.status === 401) { showLogin(); }
+    else { showApp(); }
+  })
+  .catch(function() { showLogin(); });
 </script>
 </body>
 </html>

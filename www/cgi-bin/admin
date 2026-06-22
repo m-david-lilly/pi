@@ -381,8 +381,8 @@ get_vpn_raw() {
 
 # ── POST handlers ───────────────────────────────────────────────────
 
-handle_post() {
-	read -r POSTDATA
+handle_post_with_data() {
+	POSTDATA="$1"
 	action=$(echo "$POSTDATA" | jsonfilter -e '@.action' 2>/dev/null)
 	case "$action" in
 		adblock_reload)
@@ -458,16 +458,100 @@ handle_post() {
 				echo '{"ok":false,"message":"wan-weight.sh not found"}'
 			fi
 			;;
+		reboot)
+			send_json
+			echo '{"ok":true,"message":"Rebooting in 2 seconds..."}'
+			sleep 2 && reboot &
+			;;
+		change_password)
+			send_json
+			cur_pass=$(echo "$POSTDATA" | jsonfilter -e '@.current_password' 2>/dev/null)
+			new_pass=$(echo "$POSTDATA" | jsonfilter -e '@.new_password' 2>/dev/null)
+			if [ -z "$cur_pass" ] || [ -z "$new_pass" ]; then
+				echo '{"ok":false,"message":"Missing fields"}'
+				break
+			fi
+			stored=$(cat "$CRED_FILE" 2>/dev/null)
+			expected_user=$(echo "$stored" | cut -d: -f1)
+			expected_pass=$(echo "$stored" | cut -d: -f2-)
+			if [ "$cur_pass" != "$expected_pass" ]; then
+				echo '{"ok":false,"message":"Current password is incorrect"}'
+				break
+			fi
+			if [ ${#new_pass} -lt 4 ]; then
+				echo '{"ok":false,"message":"New password must be at least 4 characters"}'
+				break
+			fi
+			printf '%s:%s\n' "$expected_user" "$new_pass" > "$CRED_FILE"
+			chmod 600 "$CRED_FILE"
+			echo '{"ok":true,"message":"Password changed"}'
+			;;
 		*)
 			send_error "unknown action: $action"
 			;;
 	esac
 }
 
+# ── Auth ────────────────────────────────────────────────────────────
+
+CRED_FILE="/etc/piadmin/credentials"
+SESSION_DIR="/tmp/piadmin-sessions"
+
+send_401() {
+	printf 'Status: 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n'
+	echo '{"error":"unauthorized"}'
+	exit 0
+}
+
+check_auth() {
+	token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
+	[ -z "$token" ] && send_401
+	[ ! -f "$SESSION_DIR/$token" ] && send_401
+	created=$(cat "$SESSION_DIR/$token" 2>/dev/null)
+	now=$(date +%s)
+	elapsed=$(( now - created ))
+	if [ "$elapsed" -gt 86400 ]; then
+		rm -f "$SESSION_DIR/$token"
+		send_401
+	fi
+}
+
+handle_login() {
+	read -r POSTDATA
+	user=$(echo "$POSTDATA" | jsonfilter -e '@.username' 2>/dev/null)
+	pass=$(echo "$POSTDATA" | jsonfilter -e '@.password' 2>/dev/null)
+	if [ -z "$user" ] || [ -z "$pass" ]; then
+		send_json
+		echo '{"ok":false,"message":"missing credentials"}'
+		return
+	fi
+	stored=$(cat "$CRED_FILE" 2>/dev/null)
+	expected_user=$(echo "$stored" | cut -d: -f1)
+	expected_pass=$(echo "$stored" | cut -d: -f2-)
+	if [ "$user" = "$expected_user" ] && [ "$pass" = "$expected_pass" ]; then
+		mkdir -p "$SESSION_DIR"
+		token=$(head -c 32 /dev/urandom | md5sum | cut -d' ' -f1)
+		echo "$(date +%s)" > "$SESSION_DIR/$token"
+		printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=%s; Path=/; Max-Age=86400; SameSite=Strict; HttpOnly\r\n\r\n' "$token"
+		echo "{\"ok\":true,\"token\":\"$token\"}"
+	else
+		send_json
+		echo '{"ok":false,"message":"invalid credentials"}'
+	fi
+}
+
+handle_logout() {
+	token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
+	[ -n "$token" ] && rm -f "$SESSION_DIR/$token"
+	printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=; Path=/; Max-Age=0\r\n\r\n'
+	echo '{"ok":true}'
+}
+
 # ── Router ──────────────────────────────────────────────────────────
 
 case "$REQUEST_METHOD" in
 	GET)
+		check_auth
 		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([^&]*\).*/\1/p')
 		case "$section" in
 			system)  get_system ;;
@@ -481,7 +565,41 @@ case "$REQUEST_METHOD" in
 		esac
 		;;
 	POST)
-		handle_post
+		# Peek at content to route login/logout without auth
+		read -r POSTDATA
+		action=$(echo "$POSTDATA" | jsonfilter -e '@.action' 2>/dev/null)
+		case "$action" in
+			login)
+				user=$(echo "$POSTDATA" | jsonfilter -e '@.username' 2>/dev/null)
+				pass=$(echo "$POSTDATA" | jsonfilter -e '@.password' 2>/dev/null)
+				if [ -z "$user" ] || [ -z "$pass" ]; then
+					send_json; echo '{"ok":false,"message":"missing credentials"}'; exit 0
+				fi
+				stored=$(cat "$CRED_FILE" 2>/dev/null)
+				expected_user=$(echo "$stored" | cut -d: -f1)
+				expected_pass=$(echo "$stored" | cut -d: -f2-)
+				if [ "$user" = "$expected_user" ] && [ "$pass" = "$expected_pass" ]; then
+					mkdir -p "$SESSION_DIR"
+					token=$(head -c 32 /dev/urandom | md5sum | cut -d' ' -f1)
+					echo "$(date +%s)" > "$SESSION_DIR/$token"
+					printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=%s; Path=/; Max-Age=86400; SameSite=Strict; HttpOnly\r\n\r\n' "$token"
+					echo "{\"ok\":true,\"token\":\"$token\"}"
+				else
+					send_json; echo '{"ok":false,"message":"invalid credentials"}'
+				fi
+				exit 0
+				;;
+			logout)
+				token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
+				[ -n "$token" ] && rm -f "$SESSION_DIR/$token"
+				printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=; Path=/; Max-Age=0\r\n\r\n'
+				echo '{"ok":true}'
+				exit 0
+				;;
+		esac
+		check_auth
+		# Re-inject POSTDATA for handle_post since we already read stdin
+		handle_post_with_data "$POSTDATA"
 		;;
 	*)
 		send_error "method not allowed"

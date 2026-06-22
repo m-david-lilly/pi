@@ -76,6 +76,14 @@ Depends pulled in automatically by pbr: `resolveip`, `ip-full`.
 > **Per-server caveat:** Surfshark gives one config per server. Rotating servers
 > means updating `endpoint_host`, `endpoint_port`, and the peer `public_key`.
 > Hardcoding one server gives no VPN-side failover if that server dies.
+>
+> **As-built: dynamic server loading.** Multiple Surfshark `.conf` files are
+> stored in `/etc/wireguard/servers/` (e.g. `us-phx.conf`, `ca-van.conf`,
+> `uk-lon.conf`). The admin dashboard CGI (`/www/cgi-bin/admin`) enumerates
+> them at request time and presents a server selector in the VPN card.
+> Switching servers updates the peer `public_key` and `endpoint_host` in UCI.
+> To add a new server, drop a `.conf` file in the directory — no restart
+> needed.
 
 ### 3.1 Secrets handling — NO plaintext keys in git
 

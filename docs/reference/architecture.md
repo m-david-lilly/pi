@@ -166,9 +166,9 @@ composable.
 │  PLANE 1 — DNS / FILTERING                                       │
 │  dnsmasq + adblock + https-dns-proxy (DoH)  (all + luci apps)    │
 │  - adblock returns NXDOMAIN for blocked domains                  │
-│  - feeds (adblock 4.5.6 catalog): oisd_big, certpl, hagezi       │
-│    (FR-F2's hagezi Pro/TIF + urlhaus do NOT exist in 4.5.6;      │
-│     these three are the closest available match — open gap)      │
+│  - 9 feeds (~561k domains): oisd_big, certpl, hagezi (multi-pro),│
+│    adguard, adguard_tracking, stevenblack, firetv_tracking,      │
+│    smarttv_tracking, android_tracking                             │
 │  - https-dns-proxy DoH upstreams: Cloudflare 127.0.0.1#5053 +    │
 │    Google 127.0.0.1#5054. It AUTO-WIRES dnsmasq (noresolv +      │
 │    server=#5053/#5054) AND auto-installs force-DNS (port-53      │

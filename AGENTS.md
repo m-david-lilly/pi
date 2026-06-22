@@ -41,8 +41,10 @@ reach the box, and what's left. **Read it before touching anything** — several
 | WAN1 | USB3 RTL8153, device **`uwan1`** (MAC `44:ed:57:10:00:30`), iface `wan1`, metric 10 |
 | WAN2 | USB3 RTL8153, device **`uwan2`** (MAC `00:e0:4c:68:01:1e`), iface `wan2`, metric 20 |
 | Firewall zones | `lan` (masq 0) · `wan` (holds BOTH `wan1`+`wan2`, masq 1) · `vpn` (wgvpn) |
-| DNS | dnsmasq + adblock (~463k domains) + **https-dns-proxy** DoH: Cloudflare `127.0.0.1#5053` + Google `#5054` |
-| VPN | Surfshark WireGuard `wgvpn` + pbr — **staged DEFAULT-OFF**, placeholder creds |
+| DNS | dnsmasq + adblock (~561k domains, 9 feeds: oisd_big, certpl, hagezi multi-pro, adguard, adguard_tracking, stevenblack, firetv_tracking, smarttv_tracking, android_tracking) + **https-dns-proxy** DoH: Cloudflare `127.0.0.1#5053` + Google `#5054` |
+| VPN | Surfshark WireGuard `wgvpn` + pbr — **DEFAULT-OFF**, real creds injected. Multiple servers loaded dynamically from `/etc/wireguard/servers/*.conf` |
+| Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (`/etc/piadmin/credentials`, default `admin`/`admin`). HTTPS via local CA cert. |
+| TLS | Local CA ("Pi Home CA") → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). |
 | Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled**. |
 
 > This topology is the **inverse** of the original design (which put WAN1 on the
@@ -125,8 +127,9 @@ artifact, never conclusively root-caused. **Don't renumber.** A downstream NAT
 WiFi router uses its OWN non-192.168.1.x LAN instead (the MR60 uses 10.0.0.0/24).
 
 ### 10. adblock feed catalog gap
-adblock 4.5.6 has NO `hagezi Pro/TIF` or `urlhaus` (the original FR-F2 targets).
-Deployed feeds = `oisd_big certpl hagezi` (closest match). **Do NOT add
+adblock 4.5.6 has NO `urlhaus` (the original FR-F2 target). Deployed feeds =
+`oisd_big certpl hagezi` (multi-pro variant) `adguard adguard_tracking stevenblack
+firetv_tracking smarttv_tracking android_tracking` (~561k domains). **Do NOT add
 `doh_blocklist`** without first confirming it doesn't list `cloudflare-dns.com` /
 `dns.google` — those are the router's own DoH upstreams; blocking them blackholes
 its resolver.
@@ -212,6 +215,9 @@ scripts/
   stage-vpn.sh      # idempotent VPN+pbr staging      (staged)
   apply-wg-secret.sh# inject WG private key from /etc/wireguard/wgvpn.secret
   README.md         # install + hardware-verified status
+www/
+  admin.html        # single-page admin dashboard (HTML/JS/CSS)
+  cgi-bin/admin     # shell CGI backend for the dashboard API + auth
 docs/
   reference/{architecture,hardware,load-balancing,vpn}.md    # AS-BUILT (authoritative)
   planning/requirements.md                                   # AS-BUILT (FR/NFR)
@@ -220,6 +226,7 @@ docs/
 
 **Secrets:** `.claude/.secrets/` is gitignored — real keys/passwords live there,
 NEVER in tracked files. Tracked config uses placeholders (`<WG_PRIVATE_KEY>` etc.).
+The `.secrets/ca/` subdirectory holds the local CA key/cert for TLS.
 Always scan a diff for secrets before committing.
 
 ---
@@ -238,16 +245,18 @@ to fire the hotplug NIC rename. Then: `mwan3 restart; /etc/init.d/adblock reload
 
 ## What's left (resume points)
 
-- **VPN (Surfshark + pbr):** staged default-OFF. To enable: inject real creds
-  (`apply-wg-secret.sh`), set peer public_key/endpoint_host, enable iface + pbr,
-  then **Phase 8.6**: wgvpn device-bind on https-dns-proxy + toggle switching
-  dnsmasq upstream + a DNS-leak test. **NFR-S2 (router DNS via tunnel) is NOT yet
-  met** — known/accepted debt while VPN is off. `stage-vpn.sh` creates the pbr
-  `lan_via_vpn` policy (a fresh image has only stock pbr example policies).
+- **VPN DNS-leak closure (Phase 8.6):** real Surfshark creds are injected and
+  multiple servers are configured in `/etc/wireguard/servers/`. What remains:
+  wgvpn device-bind on https-dns-proxy + toggle switching dnsmasq upstream + a
+  DNS-leak test. **NFR-S2 (router DNS via tunnel) is NOT yet met** —
+  known/accepted debt while VPN is off.
 - **Capacity weighting** works but falls back to 50/50 when librespeed.org's
   server-list endpoint is down (upstream outage); self-corrects on the next cron.
 - **Cosmetic:** Pi timezone is UTC (`GMT0`); set local zone if local-time logs wanted.
 - **Permanent media:** move off the SD to NVMe/USB-SSD for an always-on appliance.
+- **Dashboard: change admin password from default** — credentials are
+  `admin`/`admin` in `/etc/piadmin/credentials`. Change via the dashboard's
+  "Change Password" link or directly on the Pi.
 
 ---
 

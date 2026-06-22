@@ -13,6 +13,17 @@ the design rationale lives in the [reference docs](../docs/reference/).
 | `stage-vpn.sh` | `/usr/bin/stage-vpn.sh` | One-shot, idempotent: stage WireGuard + pbr split-tunnel (DEFAULT OFF), no secret, no internet. | Phase 7.1 |
 | `apply-wg-secret.sh` | `/usr/bin/apply-wg-secret.sh` | Inject the Surfshark private key into UCI from `/etc/wireguard/wgvpn.secret` (never git-tracked). | Phase 7.2 |
 
+### Admin dashboard (www/)
+
+| File | Installs to | Purpose | Runbook phase |
+|---|---|---|---|
+| `www/admin.html` | `/www/admin.html` | Single-page admin dashboard (HTML/JS/CSS). Session-based login, auto-refresh, tooltips. | Phase 10 |
+| `www/cgi-bin/admin` | `/www/cgi-bin/admin` | Shell CGI backend. Serves JSON status (system, WAN, mwan3, adblock, DNS, VPN), handles actions (adblock toggle, VPN server switch, WAN re-weight, reboot), and manages auth (login/logout/change-password). | Phase 10 |
+
+The dashboard CGI dynamically loads VPN servers from `/etc/wireguard/servers/*.conf` —
+drop a Surfshark WireGuard config file in and it appears in the UI. Auth credentials
+are in `/etc/piadmin/credentials` (default `admin`/`admin`, change via the UI).
+
 Target shell is OpenWrt's BusyBox **ash** (POSIX `sh`), not bash.
 
 ## Install
@@ -61,9 +72,10 @@ egresses a WAN (encrypted under DoH, but not tunnel-routed → NFR-S2 not yet me
 ## Hardware-verified status (2026-06-20, OpenWrt 25.12.4, mwan3 2.12.0)
 
 `bringup.sh`, `wan-weight.sh`, and `mwan3.user` were run on real hardware and the
-full dual-WAN + DNS stack was proven working. The VPN scripts (`vpn-toggle.sh`,
-`stage-vpn.sh`, `apply-wg-secret.sh`) remain **staged / not yet exercised** — the
-VPN is default-OFF pending real Surfshark credentials.
+full dual-WAN + DNS stack was proven working. Real Surfshark WireGuard credentials
+have been injected and multiple servers configured in `/etc/wireguard/servers/`.
+The VPN is default-OFF but ready to connect via the admin dashboard or
+`vpn-toggle.sh on`.
 
 Hard-won facts now baked into `wan-weight.sh`:
 
