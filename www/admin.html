@@ -98,6 +98,36 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
   font-weight: 600;
   font-size: 0.92rem;
 }
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  margin-left: auto;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--red);
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle input:checked + .toggle-slider { background: var(--green); }
+.toggle input:checked + .toggle-slider::before { transform: translateX(16px); }
 .dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -568,7 +598,11 @@ function renderWan(d) {
     const w = d[name];
     html += '<div class="wan-block">';
     html += '<div class="wan-header"><span class="dot ' + (w.up ? 'dot-green' : 'dot-red') + '"></span>' +
-            name.toUpperCase() + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-dim)">(' + w.device + ')</span></div>';
+            name.toUpperCase() + ' <span style="font-weight:400;font-size:0.8rem;color:var(--text-dim)">(' + w.device + ')</span>' +
+            '<label class="toggle" title="' + (w.up ? 'Disable' : 'Enable') + ' ' + name.toUpperCase() + '">' +
+            '<input type="checkbox"' + (w.up ? ' checked' : '') +
+            ' onchange="onWanToggle(\'' + name + '\',this.checked)">' +
+            '<span class="toggle-slider"></span></label></div>';
     html += statRow('Status', w.up ? 'Online' : 'Offline', 'Whether this WAN uplink is connected and passing traffic.');
     html += statRow('ISP', w.isp || '—', 'The Internet Service Provider for this uplink, looked up from the public IP.');
     html += statRow('Address', w.address || '—', 'The private IP assigned to this interface by the upstream router/modem via DHCP.');
@@ -1047,6 +1081,30 @@ function fetchUpdates() {
     .then(function(data) { renderUpdates(data); })
     .catch(function(err) {
       if (err.message !== 'auth') console.error('Updates fetch error:', err);
+    });
+}
+
+function onWanToggle(iface, checked) {
+  if (!checked && !confirm('Disable ' + iface.toUpperCase() + '? All traffic will shift to the other WAN.')) {
+    setTimeout(fetchAll, 0);
+    return;
+  }
+  var state = checked ? 'enable' : 'disable';
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'wan_toggle', iface: iface, state: state})
+  })
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(data) {
+      showToast(data.message || 'Done');
+      setTimeout(fetchAll, 3000);
+    })
+    .catch(function(err) {
+      if (err.message !== 'auth') showToast('Error: ' + err.message);
     });
 }
 

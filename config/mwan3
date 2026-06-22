@@ -1,25 +1,3 @@
-# mwan3 — dual-WAN policy for the Pi 5 router.
-#
-# Naming reconciled to the network config's wan1/wan2 logical interfaces
-# (deliberate: keep wan1/wan2 everywhere — network, firewall, mwan3, scripts).
-# Members follow the convention <iface>_m<metric>_w<weight>; wan-weight.sh
-# rewrites the `weight` of wan1_m1_w3 / wan2_m1_w3 at runtime.
-#
-# IPv4-only: the network config defines wan1/wan2 as proto dhcp (no IPv6 WAN),
-# so the stock wan6/wanb6 tracking interfaces and the v6 default rule are
-# omitted. Re-add a wanN_6 interface + v6 members here if a v6 WAN is configured.
-#
-# Tracking block per requirements.md FR-H1/FR-H2/NFR-R2 (the authoritative spec):
-#   - >=3 track_ip per WAN, DISTINCT per interface (a single resolver outage must
-#     not flap both links); reliability '2' is strictly BELOW the count (2-of-3)
-#     so loss of one target does not trip failover.
-#   - flush_conntrack on ifdown/disconnected (FR-W6): without it, flows pinned to
-#     a dead WAN black-hole instead of re-balancing onto the survivor.
-#   NOTE: docs/reference/load-balancing.md §3.1 shows 2 targets / reliability 2,
-#   which FR-H1 explicitly PROHIBITS — that doc is stale; requirements.md wins.
-#
-# For full documentation:
-# https://openwrt.org/docs/guide-user/network/wan/multiwan/mwan3#mwan3_configuration
 
 config globals 'globals'
 	option mmx_mask '0x3F00'
@@ -27,18 +5,18 @@ config globals 'globals'
 config interface 'wan1'
 	option enabled '1'
 	option family 'ipv4'
-	list track_ip '1.1.1.1'          # Cloudflare anycast
-	list track_ip '8.8.8.8'          # Google anycast
-	list track_ip '9.9.9.9'          # Quad9 anycast
+	list track_ip '1.1.1.1'
+	list track_ip '8.8.8.8'
+	list track_ip '9.9.9.9'
 	option track_method 'ping'
-	option reliability '2'           # 2-of-3 must reply (strictly below count)
+	option reliability '2'
 	option count '1'
 	option timeout '4'
 	option interval '10'
-	option failure_interval '5'      # probe faster while transitioning
+	option failure_interval '5'
 	option recovery_interval '5'
-	option down '3'                  # 3 consecutive fails => offline
-	option up '3'                    # 3 consecutive oks   => online
+	option down '3'
+	option up '3'
 	list flush_conntrack 'ifdown'
 	list flush_conntrack 'disconnected'
 	option initial_state 'online'
@@ -46,9 +24,9 @@ config interface 'wan1'
 config interface 'wan2'
 	option enabled '1'
 	option family 'ipv4'
-	list track_ip '1.0.0.1'          # Cloudflare anycast (secondary)
-	list track_ip '8.8.4.4'          # Google anycast (secondary)
-	list track_ip '149.112.112.112'  # Quad9 anycast (secondary)
+	list track_ip '1.0.0.1'
+	list track_ip '8.8.4.4'
+	list track_ip '149.112.112.112'
 	option track_method 'ping'
 	option reliability '2'
 	option count '1'
@@ -65,7 +43,7 @@ config interface 'wan2'
 config member 'wan1_m1_w3'
 	option interface 'wan1'
 	option metric '1'
-	option weight '3'
+	option weight '1000'
 
 config member 'wan1_m2_w3'
 	option interface 'wan1'
@@ -80,17 +58,13 @@ config member 'wan2_m1_w2'
 config member 'wan2_m1_w3'
 	option interface 'wan2'
 	option metric '1'
-	option weight '3'
+	option weight '1000'
 
 config member 'wan2_m2_w2'
 	option interface 'wan2'
 	option metric '2'
 	option weight '2'
 
-# Preset policies: only `balanced` is wired to a rule below. wan1_only/wan2_only
-# (single-WAN pin) and wan1_wan2/wan2_wan1 (failover priority) are inert presets
-# — swap one into a rule's `use_policy` to activate. Kept intentionally so common
-# routing modes are one edit away; they consume no resources while unreferenced.
 config policy 'wan1_only'
 	list use_member 'wan1_m1_w3'
 	option last_resort 'unreachable'
@@ -119,9 +93,11 @@ config rule 'https'
 	option dest_port '443'
 	option proto 'tcp'
 	option use_policy 'balanced'
+	option timeout '14400'
 
 config rule 'default_rule_v4'
 	option dest_ip '0.0.0.0/0'
 	option proto 'all'
 	option use_policy 'balanced'
 	option family 'ipv4'
+

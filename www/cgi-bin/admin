@@ -523,6 +523,28 @@ handle_post_with_data() {
 			fi
 			echo "{\"ok\":true,\"message\":\"Switched to $new_name\"}"
 			;;
+		wan_toggle)
+			send_json
+			iface=$(echo "$POSTDATA" | jsonfilter -e '@.iface' 2>/dev/null)
+			state=$(echo "$POSTDATA" | jsonfilter -e '@.state' 2>/dev/null)
+			case "$iface" in
+				wan1|wan2) ;;
+				*) echo '{"ok":false,"message":"invalid interface"}'; break ;;
+			esac
+			case "$state" in
+				enable)
+					ifup "$iface" 2>/dev/null
+					mwan3 ifup "$iface" 2>/dev/null
+					echo "{\"ok\":true,\"message\":\"${iface} enabled\"}"
+					;;
+				disable)
+					mwan3 ifdown "$iface" 2>/dev/null
+					ifdown "$iface" 2>/dev/null
+					echo "{\"ok\":true,\"message\":\"${iface} disabled\"}"
+					;;
+				*) echo '{"ok":false,"message":"invalid state"}' ;;
+			esac
+			;;
 		wan_weight)
 			send_json
 			if [ -x /usr/bin/wan-weight.sh ]; then
