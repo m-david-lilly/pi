@@ -2,14 +2,31 @@
 # CGI endpoint for the admin dashboard.
 # Serves JSON status data (GET ?section=...) and handles actions (POST).
 
+SEC_HDRS="X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self' 'unsafe-inline'\r\nCache-Control: no-store"
+
 send_json() {
-	printf 'Content-Type: application/json\r\n\r\n'
+	printf 'Content-Type: application/json\r\n%b\r\n\r\n' "$SEC_HDRS"
 }
 
 send_error() {
-	printf 'Status: 400 Bad Request\r\nContent-Type: application/json\r\n\r\n'
-	printf '{"error":"%s"}\n' "$1"
+	printf 'Status: 400 Bad Request\r\nContent-Type: application/json\r\n%b\r\n\r\n' "$SEC_HDRS"
+	printf '{"error":"bad request"}\n'
 	exit 0
+}
+
+# ── Input validation ───────────────────────────────────────────────
+
+is_safe_id() {
+	echo "$1" | grep -qE '^[a-z0-9-]+$'
+}
+
+sanitize_for_shell() {
+	printf '%s' "$1" | sed "s/[^a-zA-Z0-9 @._!?#%^+=,:;/-]//g"
+}
+
+hash_password() {
+	_salt="$1"; _pass="$2"
+	printf '%s:%s' "$_salt" "$_pass" | sha256sum | cut -d' ' -f1
 }
 
 # ── GET handlers ────────────────────────────────────────────────────
@@ -425,13 +442,13 @@ handle_post_with_data() {
 		vpn_switch)
 			send_json
 			server_id=$(echo "$POSTDATA" | jsonfilter -e '@.server' 2>/dev/null)
-			if [ -z "$server_id" ]; then
-				echo '{"ok":false,"message":"missing server id"}'
+			if [ -z "$server_id" ] || ! is_safe_id "$server_id"; then
+				echo '{"ok":false,"message":"invalid server id"}'
 				break
 			fi
 			conf_file="$SERVERS_DIR/$server_id.conf"
 			if ! parse_conf "$conf_file"; then
-				echo "{\"ok\":false,\"message\":\"unknown server: $server_id\"}"
+				echo '{"ok":false,"message":"server not found"}'
 				break
 			fi
 			new_name=$(server_name "$server_id")
@@ -473,8 +490,7 @@ handle_post_with_data() {
 			fi
 			stored=$(cat "$CRED_FILE" 2>/dev/null)
 			expected_user=$(echo "$stored" | cut -d: -f1)
-			expected_pass=$(echo "$stored" | cut -d: -f2-)
-			if [ "$cur_pass" != "$expected_pass" ]; then
+			if ! verify_password "$expected_user" "$cur_pass"; then
 				echo '{"ok":false,"message":"Current password is incorrect"}'
 				break
 			fi
@@ -482,8 +498,12 @@ handle_post_with_data() {
 				echo '{"ok":false,"message":"New password must be at least 4 characters"}'
 				break
 			fi
-			printf '%s:%s\n' "$expected_user" "$new_pass" > "$CRED_FILE"
+			new_salt=$(head -c 16 /dev/urandom | hexdump -e '16/1 "%02x"')
+			new_hash=$(hash_password "$new_salt" "$new_pass")
+			printf '%s:%s:%s\n' "$expected_user" "$new_salt" "$new_hash" > "$CRED_FILE"
 			chmod 600 "$CRED_FILE"
+			cur_token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([a-f0-9]*\).*/\1/p')
+			invalidate_all_sessions "$cur_token"
 			echo '{"ok":true,"message":"Password changed"}'
 			;;
 		*)
@@ -493,19 +513,25 @@ handle_post_with_data() {
 }
 
 # ── Auth ────────────────────────────────────────────────────────────
+# Credentials file format: username:salt:hash
+# Hash = sha256(salt:password)
 
 CRED_FILE="/etc/piadmin/credentials"
 SESSION_DIR="/tmp/piadmin-sessions"
+FAIL_DIR="/tmp/piadmin-fails"
+MAX_FAILS=5
+LOCKOUT_SECS=60
 
 send_401() {
-	printf 'Status: 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n'
+	printf 'Status: 401 Unauthorized\r\nContent-Type: application/json\r\n%b\r\n\r\n' "$SEC_HDRS"
 	echo '{"error":"unauthorized"}'
 	exit 0
 }
 
 check_auth() {
-	token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
+	token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([a-f0-9]*\).*/\1/p')
 	[ -z "$token" ] && send_401
+	is_safe_id "$token" || send_401
 	[ ! -f "$SESSION_DIR/$token" ] && send_401
 	created=$(cat "$SESSION_DIR/$token" 2>/dev/null)
 	now=$(date +%s)
@@ -516,35 +542,81 @@ check_auth() {
 	fi
 }
 
-handle_login() {
-	read -r POSTDATA
-	user=$(echo "$POSTDATA" | jsonfilter -e '@.username' 2>/dev/null)
-	pass=$(echo "$POSTDATA" | jsonfilter -e '@.password' 2>/dev/null)
-	if [ -z "$user" ] || [ -z "$pass" ]; then
-		send_json
-		echo '{"ok":false,"message":"missing credentials"}'
-		return
-	fi
-	stored=$(cat "$CRED_FILE" 2>/dev/null)
-	expected_user=$(echo "$stored" | cut -d: -f1)
-	expected_pass=$(echo "$stored" | cut -d: -f2-)
-	if [ "$user" = "$expected_user" ] && [ "$pass" = "$expected_pass" ]; then
-		mkdir -p "$SESSION_DIR"
-		token=$(head -c 32 /dev/urandom | md5sum | cut -d' ' -f1)
-		echo "$(date +%s)" > "$SESSION_DIR/$token"
-		printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=%s; Path=/; Max-Age=86400; SameSite=Strict; HttpOnly\r\n\r\n' "$token"
-		echo "{\"ok\":true,\"token\":\"$token\"}"
-	else
-		send_json
-		echo '{"ok":false,"message":"invalid credentials"}'
+check_brute_force() {
+	mkdir -p "$FAIL_DIR"
+	client_ip=$(echo "$REMOTE_ADDR" | sed 's/[^a-fA-F0-9.]/_/g')
+	fail_file="$FAIL_DIR/$client_ip"
+	if [ -f "$fail_file" ]; then
+		fail_count=$(sed -n '1p' "$fail_file")
+		fail_time=$(sed -n '2p' "$fail_file")
+		now=$(date +%s)
+		elapsed=$((now - fail_time))
+		if [ "$fail_count" -ge "$MAX_FAILS" ] && [ "$elapsed" -lt "$LOCKOUT_SECS" ]; then
+			send_json
+			echo '{"ok":false,"message":"Too many attempts. Try again later."}'
+			exit 0
+		fi
+		if [ "$elapsed" -ge "$LOCKOUT_SECS" ]; then
+			rm -f "$fail_file"
+		fi
 	fi
 }
 
-handle_logout() {
-	token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
-	[ -n "$token" ] && rm -f "$SESSION_DIR/$token"
-	printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=; Path=/; Max-Age=0\r\n\r\n'
-	echo '{"ok":true}'
+record_fail() {
+	mkdir -p "$FAIL_DIR"
+	client_ip=$(echo "$REMOTE_ADDR" | sed 's/[^a-fA-F0-9.]/_/g')
+	fail_file="$FAIL_DIR/$client_ip"
+	if [ -f "$fail_file" ]; then
+		prev=$(sed -n '1p' "$fail_file")
+		count=$((prev + 1))
+	else
+		count=1
+	fi
+	printf '%d\n%d\n' "$count" "$(date +%s)" > "$fail_file"
+}
+
+clear_fails() {
+	client_ip=$(echo "$REMOTE_ADDR" | sed 's/[^a-fA-F0-9.]/_/g')
+	rm -f "$FAIL_DIR/$client_ip"
+}
+
+verify_password() {
+	_user="$1"; _pass="$2"
+	stored=$(cat "$CRED_FILE" 2>/dev/null)
+	expected_user=$(echo "$stored" | cut -d: -f1)
+	stored_salt=$(echo "$stored" | cut -d: -f2)
+	stored_hash=$(echo "$stored" | cut -d: -f3)
+	[ "$_user" != "$expected_user" ] && return 1
+	computed=$(hash_password "$stored_salt" "$_pass")
+	[ "$computed" = "$stored_hash" ]
+}
+
+gen_token() {
+	head -c 32 /dev/urandom | hexdump -e '32/1 "%02x"'
+}
+
+set_auth_cookie() {
+	printf 'Set-Cookie: sysauth=%s; Path=/; Max-Age=86400; SameSite=Strict; HttpOnly; Secure' "$1"
+}
+
+invalidate_all_sessions() {
+	_keep="$1"
+	for f in "$SESSION_DIR"/*; do
+		[ -f "$f" ] || continue
+		[ "$(basename "$f")" = "$_keep" ] && continue
+		rm -f "$f"
+	done
+}
+
+cleanup_stale_sessions() {
+	now=$(date +%s)
+	for f in "$SESSION_DIR"/*; do
+		[ -f "$f" ] || continue
+		created=$(cat "$f" 2>/dev/null)
+		[ -z "$created" ] && { rm -f "$f"; continue; }
+		elapsed=$((now - created))
+		[ "$elapsed" -gt 86400 ] && rm -f "$f"
+	done
 }
 
 # ── Router ──────────────────────────────────────────────────────────
@@ -552,7 +624,7 @@ handle_logout() {
 case "$REQUEST_METHOD" in
 	GET)
 		check_auth
-		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([^&]*\).*/\1/p')
+		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([a-z0-9]*\).*/\1/p')
 		case "$section" in
 			system)  get_system ;;
 			wan)     get_wan ;;
@@ -561,47 +633,47 @@ case "$REQUEST_METHOD" in
 			dns)     get_dns ;;
 			vpn)     get_vpn ;;
 			all)     get_all ;;
-			*)       send_error "unknown section: $section (use: system,wan,mwan3,adblock,dns,vpn,all)" ;;
+			*)       send_error ;;
 		esac
 		;;
 	POST)
-		# Peek at content to route login/logout without auth
 		read -r POSTDATA
 		action=$(echo "$POSTDATA" | jsonfilter -e '@.action' 2>/dev/null)
 		case "$action" in
 			login)
+				check_brute_force
+				cleanup_stale_sessions
 				user=$(echo "$POSTDATA" | jsonfilter -e '@.username' 2>/dev/null)
 				pass=$(echo "$POSTDATA" | jsonfilter -e '@.password' 2>/dev/null)
 				if [ -z "$user" ] || [ -z "$pass" ]; then
 					send_json; echo '{"ok":false,"message":"missing credentials"}'; exit 0
 				fi
-				stored=$(cat "$CRED_FILE" 2>/dev/null)
-				expected_user=$(echo "$stored" | cut -d: -f1)
-				expected_pass=$(echo "$stored" | cut -d: -f2-)
-				if [ "$user" = "$expected_user" ] && [ "$pass" = "$expected_pass" ]; then
+				if verify_password "$user" "$pass"; then
+					clear_fails
 					mkdir -p "$SESSION_DIR"
-					token=$(head -c 32 /dev/urandom | md5sum | cut -d' ' -f1)
+					token=$(gen_token)
 					echo "$(date +%s)" > "$SESSION_DIR/$token"
-					printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=%s; Path=/; Max-Age=86400; SameSite=Strict; HttpOnly\r\n\r\n' "$token"
-					echo "{\"ok\":true,\"token\":\"$token\"}"
+					printf 'Content-Type: application/json\r\n%b\r\n%s\r\n\r\n' "$SEC_HDRS" "$(set_auth_cookie "$token")"
+					echo '{"ok":true}'
 				else
+					record_fail
+					sleep 1
 					send_json; echo '{"ok":false,"message":"invalid credentials"}'
 				fi
 				exit 0
 				;;
 			logout)
-				token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([^;]*\).*/\1/p')
-				[ -n "$token" ] && rm -f "$SESSION_DIR/$token"
-				printf 'Content-Type: application/json\r\nSet-Cookie: sysauth=; Path=/; Max-Age=0\r\n\r\n'
+				token=$(echo "$HTTP_COOKIE" | sed -n 's/.*sysauth=\([a-f0-9]*\).*/\1/p')
+				[ -n "$token" ] && is_safe_id "$token" && rm -f "$SESSION_DIR/$token"
+				printf 'Content-Type: application/json\r\n%b\r\nSet-Cookie: sysauth=; Path=/; Max-Age=0; Secure\r\n\r\n' "$SEC_HDRS"
 				echo '{"ok":true}'
 				exit 0
 				;;
 		esac
 		check_auth
-		# Re-inject POSTDATA for handle_post since we already read stdin
 		handle_post_with_data "$POSTDATA"
 		;;
 	*)
-		send_error "method not allowed"
+		send_error
 		;;
 esac

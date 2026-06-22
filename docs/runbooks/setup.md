@@ -15,8 +15,8 @@ DNS filtering and an on-demand Surfshark WireGuard VPN.
 >   (`uwan1`, `uwan2`). The body's "WAN1 on onboard GbE / LAN on USB" was dropped.
 > - **Device names are `uwan1`/`uwan2`**, NOT `wan2dev`/`landev`/`*dev` — a name
 >   ending in `dev` breaks mwan3 2.12.0's route-device regex (Phase 2.4 callout).
->   The `wan2dev`/`landev` strings in the body are retained only as the broken
->   example.
+>   Original `wan2dev`/`landev` commands in the body carry as-built correction
+>   callouts.
 > - **Rename is via a hotplug rule** (`config/hotplug/05-rename-wan-by-mac`), NOT
 >   the `config device` MAC alias (netifd ignores it for these NICs).
 > - **Distinct WAN interface metrics** (wan1=10, wan2=20); **DoH dual-upstream**
@@ -97,14 +97,18 @@ DNS filtering and an on-demand Surfshark WireGuard VPN.
 
 | Role | NIC | Kernel name (pre-pin) | Pinned name (Phase 2.4) | Notes |
 | --- | --- | --- | --- | --- |
-| WAN1 | onboard GbE | `eth0` | `eth0` (not renamed) | RP1 dedicated lane, fastest path. Primary uplink. |
-| WAN2 | USB3 GbE adapter | `eth1` (typical) | `wan2dev` | Second uplink. Use a USB3 (blue) port. |
-| LAN | USB3 GbE adapter | `eth2` (typical) | `landev` | To a downstream switch. Use a USB3 (blue) port. |
+| LAN | onboard GbE | `eth0` | `eth0` → `br-lan` | Management + downstream WiFi router. **192.168.1.1/24**. |
+| WAN1 | USB3 GbE adapter | `eth1` (typical) | **`uwan1`** | Primary uplink. MAC `44:ed:57:10:00:30`, metric 10. |
+| WAN2 | USB3 GbE adapter | `eth2` (typical) | **`uwan2`** | Second uplink. MAC `00:e0:4c:68:01:1e`, metric 20. |
 
-> The `eth1`/`eth2` kernel names are pre-pin and are NOT guaranteed stable across reboots
-> for USB NICs (enumeration order can swap) — do NOT hard-code them. Phase 2.4 pins each by
-> MAC so mwan3 member-to-WAN mapping never drifts. From Phase 2.4 on, the canonical names
-> are `wan2dev` / `landev`.
+> **⚠️ AS-BUILT CORRECTION — topology inverted, device names changed.**
+> The original design put WAN1 on the onboard port and LAN on USB. The as-built
+> topology **inverts** this: onboard `eth0` = LAN, both USB NICs = WANs. Device
+> names **MUST NOT end in `dev`** — mwan3 2.12.0's `mwan3_route_line_dev()`
+> mis-parses names like `wan2dev` (see AGENTS.md trap #2). The as-built names are
+> **`uwan1`/`uwan2`**, pinned by MAC via a hotplug rule. The `eth1`/`eth2` kernel
+> names are pre-pin and NOT stable across reboots for USB NICs — the hotplug rule
+> in `config/hotplug/05-rename-wan-by-mac` renames them on plug.
 
 ### Mark / priority allocation (so subsystems do not collide)
 
@@ -251,7 +255,7 @@ uci commit network
 > This step frees `eth0` from LAN and turns it into a DHCP WAN client, so `/etc/init.d/network
 > restart` **will drop your SSH/management connection on `eth0`** and you will not get it back
 > on that port. Do this step from a keyboard+monitor or serial console, OR be ready to
-> reconnect via the USB LAN NIC (`landev`) once Phase 3 brings it up. This is a temporary
+> reconnect via the USB LAN NIC once Phase 3 brings it up. This is a temporary
 > bootstrap; Phase 3 restores the final topology.
 
 ### 2.2 Install USB-Ethernet kmod drivers
@@ -300,29 +304,36 @@ done
 USB enumeration order is not guaranteed across reboots, which can swap `eth1`/`eth2`.
 Pin a stable name to each MAC so mwan3 members never track the wrong uplink.
 
-```bash
-# Replace each <MAC_*> with the real address from step 2.3.
-# Named 'device' sections in /etc/config/network pin a stable alias name to each MAC,
-# so the kernel's eth1/eth2 enumeration order can swap on reboot without breaking config.
-# Note: the onboard NIC is intentionally NOT renamed — it stays 'eth0' (a fixed PCIe/RP1
-# device, not subject to USB re-enumeration), so only the two USB NICs are pinned here.
-uci set network.dev_wan2='device'
-uci set network.dev_wan2.name='wan2dev'
-uci set network.dev_wan2.macaddr='<MAC_WAN2>'
+> **⚠️ AS-BUILT: the `config device` UCI method below DOES NOT WORK for these
+> RTL8153 USB NICs** (netifd ignores it). The working mechanism is a **hotplug
+> rule** — see the correction callout below. The UCI commands are retained only
+> to show what was tried first.
 
-uci set network.dev_lan='device'
-uci set network.dev_lan.name='landev'
-uci set network.dev_lan.macaddr='<MAC_LAN>'
+```bash
+# ⚠️ BROKEN — retained as documentation. See hotplug correction below.
+# Replace each <MAC_*> with the real address from step 2.3.
+uci set network.dev_wan1='device'
+uci set network.dev_wan1.name='uwan1'
+uci set network.dev_wan1.macaddr='<MAC_WAN1>'
+
+uci set network.dev_wan2='device'
+uci set network.dev_wan2.name='uwan2'
+uci set network.dev_wan2.macaddr='<MAC_WAN2>'
 
 uci commit network
 /etc/init.d/network restart
 ```
 
+**AS-BUILT: use the hotplug rule instead.** Install
+`config/hotplug/05-rename-wan-by-mac` to `/etc/hotplug.d/net/05-rename-wan-by-mac`
+(`chmod +x`). It renames each USB NIC by MAC at the hotplug `add` event before
+netifd/mwan3 bind. Verified to work on cold boot with zero manual intervention.
+
 **Verify:**
 
 ```bash
-ip link show wan2dev   # exists, MAC matches <MAC_WAN2>
-ip link show landev    # exists, MAC matches <MAC_LAN>
+ip link show uwan1   # exists, MAC matches <MAC_WAN1>
+ip link show uwan2   # exists, MAC matches <MAC_WAN2>
 ```
 
 > **CORRECTION (verified on hardware, 25.12.4, 2026-06-19) — supersedes the earlier
@@ -352,16 +363,12 @@ ip link show landev    # exists, MAC matches <MAC_LAN>
 > `wan1dev`/`wan2dev`/`landev` names below are RETAINED ONLY as the broken example — do not
 > use them.
 
-> From here on, refer to the WAN2 USB device as `wan2dev`, the LAN USB device as `landev`,
-> and the onboard NIC as `eth0`. This keeps the config stable across reboots.
+> From here on, the canonical device names are **`uwan1`** (WAN1 USB NIC),
+> **`uwan2`** (WAN2 USB NIC), and `eth0` (onboard, used as `br-lan` LAN).
 >
-> **Naming is load-bearing, not illustrative.** Every later phase that touches the USB NICs
-> hard-codes these exact names (Phase 3.1 `network.lan.device`/`network.wanb.device`,
-> Phase 8.2 and 8.7 `ip link show`). The pinned names `wan2dev`/`landev` are the canonical
-> scheme for this build — they MUST match wherever referenced. The sibling reference docs
-> use different example names (`hardware.md` §4 shows `wan2`/`lan_usb`; `load-balancing.md`
-> §2 overrides the kernel names `eth1`/`eth2` directly); those are illustrative only. If you
-> follow a reference doc first, rename to `wan2dev`/`landev` here or the later phases break.
+> **Naming is load-bearing, not illustrative.** Every later phase that touches
+> the USB NICs uses these exact names. The names **MUST NOT end in `dev`** —
+> see AGENTS.md trap #2 for why.
 
 ---
 
@@ -369,32 +376,38 @@ ip link show landev    # exists, MAC matches <MAC_LAN>
 
 ### 3.1 Define the final interfaces
 
-> **Lock-out warning:** this step moves the LAN off the onboard `eth0` (where your
-> workstation has been plugged in for Phases 1-2) onto the USB NIC `landev`, and turns
-> `eth0` into WAN1. After `/etc/init.d/network restart` you **lose management connectivity
-> on `eth0`**. Before running this block, move your workstation cable to `landev` (or a
-> switch hanging off it), or drive this step from a keyboard+monitor / serial console.
+> **⚠️ AS-BUILT CORRECTION — topology inverted.** The original design below puts
+> WAN1 on onboard `eth0` and LAN on a USB NIC. The as-built **inverts** this:
+> onboard `eth0` = LAN (`br-lan`, 192.168.1.1), both USB NICs = WANs
+> (`uwan1`/`uwan2`). Use `scripts/bringup.sh` for the as-built topology instead
+> of running these commands directly. The original commands are retained for
+> reference only.
 
 ```bash
-# LAN: the USB NIC to your switch.
+# ⚠️ ORIGINAL DESIGN — see as-built correction above.
+# AS-BUILT: LAN = onboard eth0 (br-lan), WAN1 = uwan1, WAN2 = uwan2.
+# Use bringup.sh for the correct as-built topology.
+
+# LAN: onboard GbE.
 uci set network.lan='interface'
-uci set network.lan.device='landev'
+uci set network.lan.device='br-lan'   # as-built: eth0 bridged
 uci set network.lan.proto='static'
 uci set network.lan.ipaddr='192.168.1.1'
 uci set network.lan.netmask='255.255.255.0'
 
-# WAN1: onboard GbE (fastest path).
-uci set network.wan='interface'
-uci set network.wan.device='eth0'
-uci set network.wan.proto='dhcp'
-# Don't accept upstream DNS — we run our own resolver (adblock). Prevents DNS leaks later.
-uci set network.wan.peerdns='0'
+# WAN1: USB3 GbE.
+uci set network.wan1='interface'
+uci set network.wan1.device='uwan1'   # as-built: NOT eth0
+uci set network.wan1.proto='dhcp'
+uci set network.wan1.peerdns='0'
+uci set network.wan1.metric='10'
 
 # WAN2: USB3 GbE.
-uci set network.wanb='interface'
-uci set network.wanb.device='wan2dev'
-uci set network.wanb.proto='dhcp'
-uci set network.wanb.peerdns='0'
+uci set network.wan2='interface'
+uci set network.wan2.device='uwan2'   # as-built: NOT wan2dev
+uci set network.wan2.proto='dhcp'
+uci set network.wan2.peerdns='0'
+uci set network.wan2.metric='20'
 
 # REQUIRED for dual-WAN: give each WAN a DISTINCT route metric. Without distinct
 # metrics, both DHCP clients race to install a default route into the main table and
@@ -1298,7 +1311,7 @@ cat /etc/openwrt_release | grep ARCH           # aarch64_cortex-a76
 ### 8.2 Interfaces pinned and up
 
 ```bash
-ip link show wan2dev && ip link show landev    # USB NICs present by pinned name
+ip link show uwan1 && ip link show uwan2    # USB NICs present by pinned name
 ip addr show eth0                              # WAN1 has a lease
 ubus call network.interface.wanb status | jsonfilter -e '@["ipv4-address"][0].address'
 ```
@@ -1351,7 +1364,7 @@ reboot
 Wait for the Pi to finish rebooting and re-establish SSH, then run:
 
 ```bash
-ip link show wan2dev; ip link show landev      # pinned names survive
+ip link show uwan1; ip link show uwan2      # pinned names survive
 mwan3 interfaces                               # both WANs online
 /etc/init.d/adblock status                     # adblock running
 /usr/bin/vpn-toggle.sh status                  # VPN still OFF by default
