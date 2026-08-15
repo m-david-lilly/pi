@@ -1776,3 +1776,38 @@ curl http://<WAN_IP>:32400/identity   # expect Plex XML response
 > fallback path if direct connections fail. After setting up port forwarding and both
 > devices are configured correctly, Plex should show "Fully accessible outside your
 > network" in Settings → Remote Access.
+
+### 12.6 — LAN clients showing "Remote" instead of "Local" (DNS rebind protection)
+
+**Symptom:** a LAN client (e.g. a PS5, another Plex app) on the same network as the
+Plex server shows the connection as "Remote" and hits the Plex Pass "remote watch pass"
+paywall, even though it's on the same subnet as the server.
+
+**Root cause:** Plex's local *secure* connection method relies on an auto-generated
+hostname like `https://10-0-0-4.<serverid>.plex.direct:32400` — a public DNS name that
+deliberately resolves to a private LAN IP. dnsmasq's `rebind_protection` (enabled by
+default in this build, `dhcp.@dnsmasq[0].rebind_protection='1'`) exists specifically to
+reject DNS responses that resolve a public-looking domain to an RFC1918 address — which
+silently blocks exactly this Plex mechanism. The client's local/secure connection test
+fails, so it falls back to the plex.tv relay and gets classified as "Remote".
+
+**Fix:** allowlist `plex.direct` from rebind protection:
+
+```bash
+uci add_list dhcp.@dnsmasq[0].rebind_domain='plex.direct'
+uci commit dhcp
+/etc/init.d/dnsmasq restart
+```
+
+This is already tracked in `config/etc-config/dhcp` (applied to the Pi 2026-08-15).
+
+**Verify:** on the affected client, fully quit and reopen the Plex app (a simple
+back-navigation is not enough — it must drop cached connection state), or sign out and
+back in. Check `/status/sessions` on the server for the session's `<Player>` element:
+`local="1" relayed="0" secure="1"` confirms a genuine local connection.
+
+> If a client is *also* running a VPN client app (e.g. Surfshark desktop) on the same
+> machine as the Plex server, its kill-switch/ad-blocking driver can independently
+> intercept local traffic even when not actively connected/tunneling. If local
+> connections still fail after the rebind fix, temporarily stop the VPN app's
+> background service and retest.

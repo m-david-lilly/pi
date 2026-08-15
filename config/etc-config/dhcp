@@ -34,6 +34,7 @@ config dnsmasq
 	list doh_backup_server '127.0.0.1#5054'
 	list doh_server '127.0.0.1#5053'
 	list doh_server '127.0.0.1#5054'
+	list rebind_domain 'plex.direct'
 
 config dhcp 'lan'
 	option interface 'lan'
