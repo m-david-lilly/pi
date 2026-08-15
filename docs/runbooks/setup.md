@@ -1592,3 +1592,187 @@ common Surfshark city codes; unknown codes fall back to a generated label.
 | Run capacity probe now | `/usr/bin/wan-weight.sh` |
 | VPN on / off / status | `/usr/bin/vpn-toggle.sh on|off|status` |
 | Bind a one-off command to a WAN | `mwan3 use wan <cmd>` |
+| Reload firewall after config change | `fw4 reload` |
+| Check active nftables port-forward rules | `nft list ruleset \| grep 32400` |
+
+---
+
+## Phase 11 — Tailscale (remote LAN access)
+
+Tailscale lets remote devices access the home LAN as if they were local — no port
+forwarding, no VPN client config on the Pi's dual-WAN setup. The Pi acts as a
+**subnet router** advertising `192.168.1.0/24`.
+
+### 11.1 Install
+
+```bash
+apk add tailscale kmod-tun
+/etc/init.d/tailscale enable
+/etc/init.d/tailscale start
+```
+
+### 11.2 Bring up and join the tailnet
+
+```bash
+tailscale up \
+  --advertise-routes=192.168.1.0/24 \
+  --accept-dns=false \
+  --advertise-exit-node
+```
+
+Copy the printed auth URL, open it on any logged-in device, and approve the Pi.
+Then in the Tailscale admin console (`login.tailscale.com`), approve:
+- the subnet route `192.168.1.0/24`
+- (optionally) the exit node
+
+### 11.3 Firewall zone for tailscale0
+
+```bash
+uci add firewall zone
+uci set firewall.tailscale=zone
+uci set firewall.tailscale.name='tailscale'
+uci set firewall.tailscale.input='ACCEPT'
+uci set firewall.tailscale.output='ACCEPT'
+uci set firewall.tailscale.forward='ACCEPT'
+uci set firewall.tailscale.device='tailscale0'
+
+uci add firewall forwarding
+uci set firewall.ts_to_lan=forwarding
+uci set firewall.ts_to_lan.src='tailscale'
+uci set firewall.ts_to_lan.dest='lan'
+
+uci add firewall forwarding
+uci set firewall.lan_to_ts=forwarding
+uci set firewall.lan_to_ts.src='lan'
+uci set firewall.lan_to_ts.dest='tailscale'
+
+uci commit firewall
+fw4 reload
+```
+
+### 11.4 Verify
+
+```bash
+tailscale status           # Pi appears as "openwrt", subnet route shown
+tailscale ping <device>    # ping another Tailscale device by name
+```
+
+Remote clients install the Tailscale app, sign into the same tailnet, and can
+then reach 192.168.1.x devices directly. Plex sees them as local clients.
+
+> **`--accept-dns=false`** is required. Without it, Tailscale rewrites `/etc/resolv.conf`
+> on the Pi, which breaks the local DoH stack (https-dns-proxy → dnsmasq). Always pass
+> this flag on the router.
+
+---
+
+## Phase 12 — Port forwarding (Plex Media Server)
+
+Exposes Plex (port 32400) to the internet through both WAN interfaces. The Pi
+DNAT's the connection to the downstream WiFi router (Orbi at `192.168.1.2`), which
+in turn forwards to the Plex server at `10.0.0.4`.
+
+**Topology:**
+
+```
+Internet → WAN1 (uwan1) ─┐
+                          ├─ Pi (DNAT :32400 → 192.168.1.2) → Orbi → Plex (10.0.0.4)
+Internet → WAN2 (uwan2) ─┘
+```
+
+Both WANs are in the `wan` firewall zone, so a single redirect rule covers both.
+mwan3 connmark-based routing ensures the reply traffic exits the same WAN the
+inbound connection arrived on.
+
+### 12.1 Reserve a static IP for the Orbi
+
+The Orbi's WAN must always be at `192.168.1.2`. Choose one:
+
+**Option A — Set a static IP on the Orbi (recommended):**
+In the Orbi admin UI (typically `http://routerlogin.net` or `http://192.168.1.2`
+once it has an address), go to **Advanced → Setup → Internet Setup** and set:
+
+| Field | Value |
+|---|---|
+| Does your Internet connection require a login? | No |
+| Internet IP Address | `192.168.1.2` |
+| Subnet Mask | `255.255.255.0` |
+| Default Gateway | `192.168.1.1` |
+| DNS (Primary) | `192.168.1.1` |
+
+**Option B — DHCP static reservation on the Pi** (requires Orbi's WAN MAC):
+
+```bash
+# Replace <ORBI_WAN_MAC> with the Orbi's WAN-side MAC (find it in the Orbi admin)
+uci add dhcp host
+uci set dhcp.@host[-1].name='orbi'
+uci set dhcp.@host[-1].mac='<ORBI_WAN_MAC>'
+uci set dhcp.@host[-1].ip='192.168.1.2'
+uci commit dhcp
+/etc/init.d/dnsmasq restart
+```
+
+### 12.2 Apply the port-forward rule on the Pi
+
+This is already live (applied 2026-08-15). To re-apply after a flash:
+
+```bash
+uci add firewall redirect
+uci set firewall.@redirect[-1].name='Plex Media Server'
+uci set firewall.@redirect[-1].src='wan'
+uci set firewall.@redirect[-1].src_dport='32400'
+uci set firewall.@redirect[-1].dest='lan'
+uci set firewall.@redirect[-1].dest_ip='192.168.1.2'
+uci set firewall.@redirect[-1].dest_port='32400'
+uci set firewall.@redirect[-1].proto='tcp udp'
+uci set firewall.@redirect[-1].target='DNAT'
+uci set firewall.@redirect[-1].enabled='1'
+uci commit firewall
+fw4 reload
+```
+
+The rule is also tracked in `config/etc-config/firewall`.
+
+### 12.3 Configure the Orbi: forward 32400 → Plex
+
+In the Orbi admin UI, go to **Advanced → Advanced Setup → Port Forwarding**:
+
+| Field | Value |
+|---|---|
+| Service Name | `Plex` |
+| Protocol | `TCP/UDP` |
+| External Port | `32400` |
+| Internal Port | `32400` |
+| Internal IP Address | `10.0.0.4` |
+
+Click **Add** and apply.
+
+### 12.4 Configure Plex to use both WAN IPs
+
+Plex needs to know its public IPs for remote access. In Plex Web:
+**Settings → Remote Access → Show Advanced**:
+
+- Confirm "Remote Access" is enabled and "Manually specify public IP" is off
+  (Plex auto-detects the WAN IP via relay)
+- Optionally add both WAN IPs to **Custom server access URLs**:
+  `http://<WAN1_IP>:32400, http://<WAN2_IP>:32400`
+
+With mwan3 HTTPS stickiness (4-hour timeout), streaming clients stay on one WAN
+for the session, so mid-stream IP switches are avoided.
+
+### 12.5 Verify
+
+```bash
+# Confirm the nftables DNAT rule is active:
+nft list ruleset | grep 32400
+# Expected output includes:
+#   dstnat_wan: tcp/udp dport 32400 dnat to 192.168.1.2:32400
+
+# From a WAN-side device (phone on mobile data, not home WiFi):
+curl http://<WAN_IP>:32400/identity   # expect Plex XML response
+```
+
+> **Note:** with the Orbi in double-NAT, the Plex relay (plex.tv relay server) is the
+> fallback path if direct connections fail. After setting up port forwarding and both
+> devices are configured correctly, Plex should show "Fully accessible outside your
+> network" in Settings → Remote Access.
