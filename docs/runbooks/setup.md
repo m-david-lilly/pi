@@ -1594,6 +1594,9 @@ common Surfshark city codes; unknown codes fall back to a generated label.
 | Bind a one-off command to a WAN | `mwan3 use wan <cmd>` |
 | Reload firewall after config change | `fw4 reload` |
 | Check active nftables port-forward rules | `nft list ruleset \| grep 32400` |
+| Tailscale peers / advertised routes | `tailscale status` / `tailscale debug prefs` |
+| Plex: is a client local or relayed? | `curl -s http://10.0.0.4:32400/status/sessions \| grep -o 'local="[01]" relayed="[01]"'` |
+| Plex: did plex.tv reject the connection list? | grep the PMS log for `403 response from PUT https://servers.plex.tv/devices` (see Phase 12.7) |
 
 ---
 
@@ -1663,6 +1666,13 @@ then reach 192.168.1.x devices directly. Plex sees them as local clients.
 > **`--accept-dns=false`** is required. Without it, Tailscale rewrites `/etc/resolv.conf`
 > on the Pi, which breaks the local DoH stack (https-dns-proxy → dnsmasq). Always pass
 > this flag on the router.
+
+> **Scope: this advertises `192.168.1.0/24` only — the Pi's own LAN.** The downstream
+> Orbi NATs its clients onto `10.0.0.0/24`, which this route does **not** cover and which
+> the Orbi will not accept unsolicited inbound traffic into. Reaching a host on that
+> subnet over the tailnet (e.g. the Plex server at `10.0.0.4`) requires that host to
+> advertise its own subnet as a second subnet router — see Phase 12.7, which also
+> explains why Tailscale's CGNAT addressing makes this mandatory for Plex specifically.
 
 ---
 
@@ -1811,3 +1821,84 @@ back in. Check `/status/sessions` on the server for the session's `<Player>` ele
 > intercept local traffic even when not actively connected/tunneling. If local
 > connections still fail after the rebind fix, temporarily stop the VPN app's
 > background service and retest.
+
+### 12.7 — Tailscale clients hit the "remote watch pass" paywall
+
+**Symptom:** a remote device on the tailnet (e.g. a phone on cellular) reaches the Plex
+server fine, but the app reports a "Relay Connection" and shows the Plex Pass paywall
+before playback.
+
+**Root cause — this cannot be fixed server-side.** plex.tv marks a published connection
+`local=true` **only when its address is in an RFC1918 private range** (`10/8`,
+`172.16/12`, `192.168/16`). Tailscale addresses live in the **CGNAT range
+`100.64.0.0/10`**, which is *not* RFC1918, so plex.tv permanently flags any Tailscale
+connection `local=false`. The client-side paywall reads that flag, and **no server
+setting overrides it** — notably `allowedNetworks` does not, even though adding
+`100.64.0.0/10` there does make the *server* label the resulting session `local="1"`
+in `/status/sessions`. The server's own view and the client's paywall check are two
+different mechanisms; only the plex.tv `local` flag gates the paywall.
+
+Inspect what plex.tv actually hands to clients (run on the Plex host):
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$tok = (Get-ItemProperty -Path "HKCU:\Software\Plex, Inc.\Plex Media Server" -Name PlexOnlineToken).PlexOnlineToken
+$h = @{ "X-Plex-Token" = $tok; "X-Plex-Client-Identifier" = "diag"; "Accept" = "application/json" }
+$res = Invoke-RestMethod -Uri "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1" -Headers $h
+($res | Where-Object { $_.clientIdentifier -eq "<MACHINE_IDENTIFIER>" }).connections |
+  ForEach-Object { "local=$($_.local) relay=$($_.relay) $($_.uri)" }
+```
+
+Only the RFC1918 entry comes back `local=True`:
+
+```
+local=True   https://10-0-0-4.<hash>.plex.direct:32400          <- the one that clears the paywall
+local=False  https://100-111-41-120.<hash>.plex.direct:32400    <- Tailscale CGNAT, always remote
+local=False  https://<wan-ip-dashed>.<hash>.plex.direct:32400
+local=False  https://<relay>.<hash>.plex.direct:8443  (relay=True)
+```
+
+**Fix: route the RFC1918 address over the tunnel** instead of trying to make the CGNAT
+address count as local. Advertise the Plex server's own LAN subnet from the **Plex host
+itself** as a Tailscale subnet router (the Pi's existing `192.168.1.0/24` advertisement
+does *not* cover the Orbi's downstream `10.0.0.0/24`, and the Orbi NATs inbound anyway):
+
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" up `
+    --advertise-routes=10.0.0.0/24 --accept-dns=false --unattended
+```
+
+Then **approve the route** at <https://login.tailscale.com/admin/machines> → the host's
+row → ⋯ → *Edit route settings* → approve `10.0.0.0/24`. Verify the advertisement
+registered with `tailscale debug prefs` (expect `AdvertiseRoutes: 10.0.0.0/24`).
+
+The client then resolves `10-0-0-4.<hash>.plex.direct` → `10.0.0.4` via public DNS,
+routes those packets over Tailscale to the Plex host (which answers on its own address),
+and hits the connection already flagged `local=True`. Because the target is the host's
+*own* IP, Windows IP forwarding is **not** required; reaching other `10.0.0.x` devices
+over the tunnel would additionally need it.
+
+**Verify:** fully quit and reopen the client app (it must re-fetch the connection list
+from plex.tv), then confirm inbound requests on the server are classified local:
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\Plex Media Server\Logs\Plex Media Server.log" -Tail 2000 |
+  Select-String "Request: \[" | Where-Object { $_.Line -notmatch "127\.0\.0\.1" } | Select-Object -Last 10
+```
+
+Expect `Request: [10.0.0.4:… (Allowed Network (Subnet))]` — **not** `(WAN)`.
+
+> **Do NOT put a raw CGNAT address in `customConnections`.** Publishing
+> `http://100.x.x.x:32400` makes plex.tv reject the **entire** device-connection update
+> with a **403**, so *no* connection changes reach any client — a silent failure that
+> makes every other fix look ineffective. The server log shows it as:
+> `403 response from PUT https://servers.plex.tv/devices/…` followed by
+> `MyPlex: Updating device connections failed, retrying in N seconds`. **Always grep the
+> log for that 403 after changing `customConnections`** — a `200` on the local
+> `PUT /:/prefs` only means the *server* accepted the value, not that plex.tv did.
+> If a Tailscale URL is wanted at all, use the secure `plex.direct` hostname form
+> (`https://100-111-41-120.<hash>.plex.direct:32400`), which plex.tv accepts — though it
+> still publishes as `local=false` and so does not by itself clear the paywall.
+
+> **Trade-off:** with this route in place, remote local-quality Plex depends on the Plex
+> host being powered on and connected to the tailnet — it is the subnet router.
