@@ -28,3 +28,7 @@ venv/
 build/
 dist/
 *.o
+
+# Go build output (proxy/ builds to dist/, but a plain `go build` drops an exe here)
+proxy/kidproxy.exe
+proxy/kidproxy

@@ -1,0 +1,21 @@
+#!/bin/sh /etc/rc.common
+# Loads the kids interception table at boot. Kept separate from fw4 so a
+# firewall reload cannot silently drop the redirects.
+
+# NOTE: do NOT set USE_PROCD=0 here. rc.common tests `[ -n "$USE_PROCD" ]`,
+# so even the string "0" makes it treat this as a procd service and replace
+# start()/stop() with procd stubs — the table then never loads at boot.
+START=20
+STOP=90
+
+start() {
+	/usr/bin/kids-nft.sh apply
+}
+
+stop() {
+	/usr/bin/kids-nft.sh flush
+}
+
+reload() {
+	/usr/bin/kids-nft.sh apply
+}

@@ -1,0 +1,29 @@
+# /etc/config/wireless — kids-only SSID on the Pi's onboard 5 GHz radio.
+#
+# The adult network stays on the downstream Orbi (10.0.0.0/24). This radio was
+# previously disabled and unused; dedicating it to the kids keeps per-device
+# attribution (each kid device gets its own 192.168.30.x lease) and avoids
+# consumer-mesh VLAN limitations. Coverage is roughly one room; to use a real
+# AP instead, disable this iface and add a tagged uplink to br-kids in
+# /etc/config/network.
+#
+# The WPA passphrase is injected by scripts/kids-setup.sh from
+# /etc/kidproxy/wifi.key (gitignored). The placeholder below is not a secret.
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
+	option band '5g'
+	option channel '36'
+	option htmode 'VHT80'
+	option cell_density '0'
+
+config wifi-iface 'kids'
+	option device 'radio0'
+	option network 'kids'
+	option mode 'ap'
+	option ssid 'Home-Kids'
+	option encryption 'sae-mixed'
+	option key '<KIDS_WIFI_PASSWORD>'
+	option isolate '1'
+	option disabled '0'

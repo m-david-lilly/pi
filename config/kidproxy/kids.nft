@@ -1,0 +1,41 @@
+#!/usr/sbin/nft -f
+# /etc/kidproxy/kids.nft — interception rules for the kids network only.
+#
+# Loaded as its own table (not via fw4) so `kids-toggle.sh` can pause filtering
+# atomically and an fw4 reload cannot drop the redirects. Managed by
+# /usr/bin/kids-nft.sh; do not edit on the router without copying back here.
+#
+# NAT: 80/443 -> kidproxy:8080 (including the gateway's own address, so the CA
+# install page works), DNS forced to the Pi.
+# FILTER: no IPv6 (nothing can escape), no QUIC/DoT/VPN/Tor/SMTP, no lateral
+# movement into the adult LAN.
+
+table inet kidproxy {
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+
+		iifname "br-kids" tcp dport { 80, 443 } counter redirect to :8080 comment "kids: web -> proxy"
+		iifname "br-kids" udp dport 53 counter redirect to :53 comment "kids: force DNS"
+		iifname "br-kids" tcp dport 53 counter redirect to :53 comment "kids: force DNS"
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+
+		iifname "br-kids" meta nfproto ipv6 counter drop comment "kids: no ipv6"
+
+		# QUIC must die so browsers fall back to the TCP path we can decrypt.
+		iifname "br-kids" udp dport 443 counter reject comment "kids: QUIC"
+		iifname "br-kids" udp dport 80 counter reject comment "kids: UDP 80"
+
+		iifname "br-kids" tcp dport 853 counter reject comment "kids: DoT"
+		iifname "br-kids" udp dport 853 counter reject comment "kids: DoT"
+
+		iifname "br-kids" tcp dport { 1194, 1723, 1701, 5000, 9001, 9030, 9050, 9051 } counter reject comment "kids: vpn/tor"
+		iifname "br-kids" udp dport { 1194, 1701, 4500, 51820 } counter reject comment "kids: vpn"
+
+		iifname "br-kids" tcp dport { 25, 465, 587 } counter reject comment "kids: smtp"
+
+		iifname "br-kids" ip daddr { 192.168.1.0/24, 10.0.0.0/8, 172.16.0.0/12 } counter reject comment "kids: no lateral"
+	}
+}

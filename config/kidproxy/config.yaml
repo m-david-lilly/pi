@@ -1,0 +1,129 @@
+# kidproxy — TLS-intercepting filter for the kids network.
+#
+# This file is deployed to /etc/kidproxy/config.yaml. It contains no secrets:
+# the SMTP password lives in /etc/msmtprc (0600), the CA key in
+# /etc/kidproxy/ca.key (0600), and the WiFi key in /etc/kidproxy/wifi.key.
+
+data_dir: /var/lib/kidproxy
+log_level: info
+retention_days: 30
+
+listen:
+  # Transparent listener: nftables redirects the kids' 80/443 here.
+  transparent: ":8080"
+  # Explicit CONNECT proxy, loopback only. Useful for testing from the Pi:
+  #   curl -x http://127.0.0.1:3128 --cacert /etc/kidproxy/ca.crt https://example.com
+  explicit: "127.0.0.1:3128"
+
+ca:
+  cert: /etc/kidproxy/ca.crt
+  key: /etc/kidproxy/ca.key
+  leaf_days: 7
+
+network:
+  kids_subnet: 192.168.30.0/24
+  gateway: 192.168.30.1
+  # Requests to these hosts are answered by the proxy itself (CA install page).
+  gateway_names:
+    - setup.kids
+    - kidproxy.lan
+
+capture:
+  # Inspect at most this much of any body; the client always gets the full stream.
+  max_body_bytes: 262144
+  snippet_bytes: 4096
+  store_snippets: true
+  text_types:
+    - text/html
+    - application/xhtml+xml
+    - text/plain
+    - application/json
+    - application/x-json
+    - text/json
+  # Never buffer media/CDN payloads.
+  skip_hosts:
+    - googlevideo.com
+    - ytimg.com
+    - ggpht.com
+    - gstatic.com
+    - doubleclick.net
+    - google-analytics.com
+    - fbcdn.net
+    - cloudfront.net
+    - akamaihd.net
+
+# Hosts that are blind-tunnelled instead of decrypted. Use sparingly: anything
+# listed here is NOT inspected. E2E-encrypted messengers are listed because
+# interception cannot read them anyway and would only break the app.
+# Social apps (Snapchat/Instagram/TikTok) are deliberately NOT bypassed by
+# default: if you need them to work, add them here knowingly.
+# Deliberately narrow: only the API/CDN hosts these apps need, never the
+# marketing/web hosts (signal.org, web.telegram.org), which stay inspectable.
+bypass:
+  - "*.whatsapp.net"
+  - "*.whatsapp.com"
+  - "chat.signal.org"
+  - "cdn.signal.org"
+  - "cdn2.signal.org"
+  - "*.whispersystems.org"
+  - "*.signal.art"
+  - "api.telegram.org"
+
+block:
+  # Hard-blocked hosts (suffix match). The kids zone already forces DNS through
+  # the Pi, so these mainly catch apps that hardcode a DoH resolver.
+  domains:
+    - dns.google
+    - dns.google.com
+    - cloudflare-dns.com
+    - mozilla.cloudflare-dns.com
+    - one.one.one.one
+    - dns.quad9.net
+    - doh.opendns.com
+    - dns.nextdns.io
+    - doh.pub
+    - dns.adguard.com
+    - dns.adguard-dns.com
+    - families.cloudflare-dns.com
+    - dns.alidns.com
+    - doh.360.cn
+  # Alert-only (never blocked): matched case-insensitively against URL, page
+  # text, video titles and search queries. Expect false positives — tune this
+  # list to your family. Keep it short; alerts are not evidence.
+  keywords:
+    - "send nudes"
+    - "send pics of you"
+    - "dont tell your parents"
+    - "don't tell your parents"
+    - "delete this chat"
+    - "kik me"
+    - "snap me your"
+    - "how old are you"
+    - "are you alone"
+    - "kill myself"
+    - "want to die"
+    - "self harm"
+
+alert:
+  first_seen: true
+  late_night: true
+  late_night_from: 23
+  late_night_to: 6
+
+notify:
+  email:
+    # Set to true and fill in `to` (or run: kids-setup.sh --email you@example.com).
+    # Requires /etc/msmtprc configured for your SMTP provider.
+    enabled: false
+    command: /usr/bin/msmtp
+    from: kidproxy@home.lan
+    to: []
+    min_severity: warn
+    cooldown_seconds: 900
+    max_per_hour: 20
+
+# Friendly names keyed by lowercase MAC. Find MACs in the dashboard or in
+# /tmp/dhcp.leases.
+devices: {}
+#  aa:bb:cc:dd:ee:ff: kid-phone
+#  11:22:33:44:55:66: kid-tablet

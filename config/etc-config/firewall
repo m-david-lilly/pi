@@ -160,3 +160,57 @@ config redirect
 	option proto 'tcp udp'
 	option target 'DNAT'
 	option enabled '1'
+
+# ---------------------------------------------------------------------------
+# Kids network (br-kids / 192.168.30.0/24)
+#
+# Isolation is deliberate: input is rejected except DNS, the proxy port and
+# ICMP, so kids cannot reach the admin dashboard, SSH, or the adult LAN.
+# All web traffic is captured by the nftables table in /etc/kidproxy/kids.nft
+# (managed by /usr/bin/kids-nft.sh), which redirects 80/443 to kidproxy and
+# blocks QUIC/DoT/VPN/Tor. Do not add a kids->lan or kids->vpn forwarding.
+# ---------------------------------------------------------------------------
+config zone
+	option name 'kids'
+	option network 'kids'
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option masq '1'
+	option mtu_fix '1'
+
+config forwarding
+	option src 'kids'
+	option dest 'wan'
+
+# DHCP must be allowed explicitly: the zone input policy is REJECT and a
+# DISCOVER arrives from 0.0.0.0 before the client has a lease.
+config rule
+	option name 'Kids-DHCP'
+	option src 'kids'
+	option proto 'udp'
+	option src_port '68'
+	option dest_port '67'
+	option target 'ACCEPT'
+
+config rule
+	option name 'Kids-DNS'
+	option src 'kids'
+	option proto 'tcp udp'
+	option dest_port '53'
+	option target 'ACCEPT'
+
+config rule
+	option name 'Kids-Proxy'
+	option src 'kids'
+	option proto 'tcp'
+	option dest_port '8080'
+	option target 'ACCEPT'
+
+config rule
+	option name 'Kids-Ping'
+	option src 'kids'
+	option proto 'icmp'
+	option icmp_type 'echo-request'
+	option target 'ACCEPT'
+
