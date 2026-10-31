@@ -224,6 +224,69 @@ func TestConfigLateNight(t *testing.T) {
 	}
 }
 
+func TestConfigLateNightTimezone(t *testing.T) {
+	c := defaultConfig()
+	c.Alert.LateNightFrom, c.Alert.LateNightTo = 23, 6
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	c.loc = loc
+	// 07:00 UTC on 2026-10-30 is midnight PDT: late night locally.
+	if !c.isLateNight(time.Date(2026, 10, 30, 7, 0, 0, 0, time.UTC)) {
+		t.Error("midnight local time not treated as late night")
+	}
+	// 23:30 UTC is 16:30 PDT: afternoon locally.
+	if c.isLateNight(time.Date(2026, 10, 30, 23, 30, 0, 0, time.UTC)) {
+		t.Error("afternoon local time treated as late night")
+	}
+}
+
+func TestParseSince(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"24h": 24 * time.Hour, "10m": 10 * time.Minute, "7d": 7 * 24 * time.Hour, "0d": 0,
+	} {
+		got, err := parseSince(in)
+		if err != nil || got != want {
+			t.Errorf("parseSince(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "7days", "d", "-1d", "soon"} {
+		if _, err := parseSince(in); err == nil {
+			t.Errorf("parseSince(%q) succeeded, want error", in)
+		}
+	}
+}
+
+func TestDenyPrivate(t *testing.T) {
+	for _, addr := range []string{
+		"127.0.0.1:8080", "192.168.1.1:80", "10.0.0.5:443", "172.16.3.4:80",
+		"169.254.1.1:80", "0.0.0.0:80", "[::1]:443", "[fd00::1]:443", "[fe80::1]:80",
+	} {
+		if err := denyPrivate("tcp", addr, nil); err == nil {
+			t.Errorf("denyPrivate(%q) allowed a private/local address", addr)
+		}
+	}
+	for _, addr := range []string{"93.184.215.14:443", "[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:443"} {
+		if err := denyPrivate("tcp", addr, nil); err != nil {
+			t.Errorf("denyPrivate(%q) = %v, want nil", addr, err)
+		}
+	}
+}
+
+func TestWSDialAddr(t *testing.T) {
+	for _, c := range []struct{ host, scheme, want string }{
+		{"example.com", "https", "example.com:443"},
+		{"example.com", "http", "example.com:80"},
+		{"example.com:8443", "https", "example.com:8443"},
+		{"[2001:db8::1]", "https", "[2001:db8::1]:443"},
+	} {
+		if got := wsDialAddr(c.host, c.scheme); got != c.want {
+			t.Errorf("wsDialAddr(%q, %q) = %q, want %q", c.host, c.scheme, got, c.want)
+		}
+	}
+}
+
 func TestConfigCaptureTypes(t *testing.T) {
 	c := defaultConfig()
 	for _, ct := range []string{"text/html", "text/html; charset=utf-8", "TEXT/PLAIN", "application/json"} {
@@ -392,6 +455,38 @@ func TestCALeafSignedByCA(t *testing.T) {
 	}
 	if len(ipParsed.IPAddresses) != 1 || ipParsed.IPAddresses[0].String() != "192.168.30.1" {
 		t.Errorf("ip SANs = %v", ipParsed.IPAddresses)
+	}
+}
+
+// TestCALeafRenewsBeforeExpiry: leaves last leaf_days, but the proxy runs for
+// weeks. A cached leaf past its renewal point must be re-minted, not served.
+func TestCALeafRenewsBeforeExpiry(t *testing.T) {
+	dir := t.TempDir()
+	if err := initCA(dir); err != nil {
+		t.Fatalf("initCA: %v", err)
+	}
+	ca, err := loadCA(filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"), 7)
+	if err != nil {
+		t.Fatalf("loadCA: %v", err)
+	}
+	first, err := ca.leaf("example.com")
+	if err != nil {
+		t.Fatalf("leaf: %v", err)
+	}
+	if again, _ := ca.leaf("example.com"); again != first {
+		t.Error("fresh leaf was not served from the cache")
+	}
+	ca.mu.Lock()
+	e := ca.cache["example.com"]
+	e.renewAt = time.Now().Add(-time.Minute)
+	ca.cache["example.com"] = e
+	ca.mu.Unlock()
+	renewed, err := ca.leaf("example.com")
+	if err != nil {
+		t.Fatalf("leaf: %v", err)
+	}
+	if renewed == first {
+		t.Error("leaf past its renewal point was served from the cache")
 	}
 }
 

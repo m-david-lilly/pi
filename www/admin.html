@@ -905,7 +905,12 @@ function renderKids(d) {
 
   body.innerHTML = html;
 
-  actions.innerHTML = s.actions || KIDS_PAUSE_ACTIONS;
+  // Only rebuild the buttons when the state changes: the 10s refresh would
+  // otherwise reset the pause-length select (and close it if open).
+  if (actions.dataset.state !== state) {
+    actions.innerHTML = s.actions || KIDS_PAUSE_ACTIONS;
+    actions.dataset.state = state;
+  }
 
   const alerts = document.getElementById('kids-alerts');
   if (!d.alerts || d.alerts.length === 0) {
@@ -1370,7 +1375,9 @@ function postAction(action) {
     })
     .then(function(data) {
       showToast(data.message || 'Done');
-      setTimeout(fetchAll, 2000);
+      // fetchAll leaves the Kids card alone while a search is active, so
+      // refresh it explicitly or a rule/pause change would not show up.
+      setTimeout(function() { fetchAll(); if (kidsQuery) fetchKids(); }, 2000);
     })
     .catch(function(err) {
       if (err.message !== 'auth') showToast('Error: ' + err.message);

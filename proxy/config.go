@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	_ "time/tzdata" // the router ships no zoneinfo; embed it for alert.timezone
 
 	"gopkg.in/yaml.v3"
 )
@@ -55,6 +56,11 @@ type Config struct {
 		LateNight     bool `yaml:"late_night"`
 		LateNightFrom int  `yaml:"late_night_from"` // hour 0-23
 		LateNightTo   int  `yaml:"late_night_to"`   // hour 0-23
+
+		// Timezone is the IANA zone the late-night window is measured in. The
+		// router clock runs in UTC and Go ignores OpenWrt's POSIX /etc/TZ, so
+		// without it "23 to 6" means 23:00-06:00 UTC.
+		Timezone string `yaml:"timezone"`
 	} `yaml:"alert"`
 
 	Notify struct {
@@ -74,6 +80,7 @@ type Config struct {
 	Devices map[string]string `yaml:"devices"`
 
 	path string
+	loc  *time.Location // from Alert.Timezone; nil means the process zone
 }
 
 func defaultConfig() *Config {
@@ -123,6 +130,13 @@ func loadConfig(path string) (*Config, error) {
 	if c.Listen.Transparent == "" && c.Listen.Explicit == "" {
 		return nil, fmt.Errorf("no listener configured")
 	}
+	if tz := strings.TrimSpace(c.Alert.Timezone); tz != "" {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, fmt.Errorf("alert.timezone: %w", err)
+		}
+		c.loc = loc
+	}
 	return c, nil
 }
 
@@ -142,6 +156,9 @@ func (c *Config) severityAtLeast(s string) bool {
 func (c *Config) isLateNight(t time.Time) bool {
 	if !c.Alert.LateNight {
 		return false
+	}
+	if c.loc != nil {
+		t = t.In(c.loc)
 	}
 	h := t.Hour()
 	from, to := c.Alert.LateNightFrom, c.Alert.LateNightTo

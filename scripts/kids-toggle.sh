@@ -11,9 +11,15 @@ set -u
 
 PAUSE_FILE=/etc/kidproxy/pause_until
 
+# Re-apply interception first and only then clear the pause: if the apply
+# fails, the pause file stays so resume-if-due retries next minute, and the
+# caller (the dashboard CGI) gets a non-zero exit instead of "resumed".
 do_resume() {
+	if ! /usr/bin/kids-nft.sh apply; then
+		logger -t kids "resume failed: could not apply interception"
+		return 1
+	fi
 	rm -f "$PAUSE_FILE"
-	/usr/bin/kids-nft.sh apply
 	logger -t kids "$1"
 }
 
@@ -47,7 +53,7 @@ pause)
 	echo "filtering paused for ${mins} min"
 	;;
 resume)
-	do_resume "filtering resumed"
+	do_resume "filtering resumed" || exit 1
 	echo "filtering resumed"
 	;;
 resume-if-due)
@@ -55,7 +61,7 @@ resume-if-due)
 	now=$(date +%s)
 	until_ts=$(cat "$PAUSE_FILE" 2>/dev/null || echo 0)
 	[ "$until_ts" -gt "$now" ] 2>/dev/null && exit 0
-	do_resume "filtering resumed after pause"
+	do_resume "filtering resumed after pause" || exit 1
 	;;
 status)
 	[ "$(uci -q get wireless.kids.disabled)" = "0" ] && enabled=1 || enabled=0

@@ -231,7 +231,7 @@ Alert kinds (`alerts.kind`):
 | `blocked` | warn | A request hit the blocklist |
 | `keyword` | high | A keyword matched URL / page text / video title / search |
 | `new-site` | info | First visit to a host that served HTML (`alert.first_seen`) |
-| `late-night` | warn | HTML navigation between `late_night_from` (23) and `late_night_to` (6) |
+| `late-night` | warn | HTML navigation between `late_night_from` (23) and `late_night_to` (6), in `alert.timezone` (set it: the router clock is UTC) |
 | `tls-pin` | info | TLS handshake failed — usually a pinned app, sometimes a broken cert |
 
 **Alert noise control:** repeats of the same `kind|host|device` are suppressed for

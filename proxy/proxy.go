@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -84,7 +85,7 @@ func newProxy(cfg *Config, ca *CA, store *Store, rules *Rules) *Proxy {
 	p := &Proxy{cfg: cfg, ca: ca, store: store, rules: rules, queue: newConnQueue()}
 	p.transport = &http.Transport{
 		Proxy:                 nil,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           upstreamDialer().DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          128,
 		MaxIdleConnsPerHost:   8,
@@ -249,7 +250,7 @@ func (p *Proxy) bump(c net.Conn, br *bufio.Reader, consumed []byte, host string,
 // tunnel relays raw bytes (pinned apps, allowlisted hosts) without decrypting.
 func (p *Proxy) tunnel(c net.Conn, br *bufio.Reader, consumed []byte, host string, port int, why string) {
 	addr := net.JoinHostPort(host, fmt.Sprint(port))
-	up, err := net.DialTimeout("tcp", addr, 15*time.Second)
+	up, err := upstreamDialer().Dial("tcp", addr)
 	if err != nil {
 		_ = c.Close()
 		return
@@ -428,9 +429,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, meta *connMeta, 
 	}
 	if buf != nil {
 		ev.Snippet = extractText(ct, buf.Bytes(), p.cfg.Capture.SnippetBytes)
-		ev.Video = parseYouTube(target, capBytes(reqCap), buf.Bytes())
-		ev.Search = parseSearch(target, capBytes(reqCap))
 	}
+	// Search queries and video IDs come from the URL and request body, so log
+	// them even when the response is not captured (store_snippets off,
+	// skip_hosts, non-text types); only player titles need the response.
+	ev.Video = parseYouTube(target, capBytes(reqCap), capBytes(buf))
+	ev.Search = parseSearch(target, capBytes(reqCap))
 	if copyErr != nil && !errors.Is(copyErr, io.ErrUnexpectedEOF) {
 		ev.Reason = "copy: " + copyErr.Error()
 	}
@@ -452,10 +456,10 @@ func (p *Proxy) shouldCapture(host, ct string, size int64) bool {
 
 func (p *Proxy) handleWS(w http.ResponseWriter, r *http.Request, meta *connMeta, host string) {
 	scheme := meta.scheme
-	addr := r.Host
+	addr := wsDialAddr(r.Host, scheme)
 	var up net.Conn
 	var err error
-	d := &net.Dialer{Timeout: 15 * time.Second}
+	d := upstreamDialer()
 	if scheme == "http" {
 		up, err = d.Dial("tcp", addr)
 	} else {
@@ -543,6 +547,48 @@ func (p *Proxy) logEvent(ev *Event) {
 }
 
 // ---- small helpers ----
+
+// upstreamDialer is the only way the proxy opens connections on a kid's
+// behalf (HTTP transport, websockets, blind tunnels).
+func upstreamDialer() *net.Dialer {
+	return &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second, Control: denyPrivate}
+}
+
+// denyPrivate is a net.Dialer Control hook. The proxy dials from the router
+// itself and the target comes from the client (Host header or SNI), so without
+// it a kids device could reach the adult LAN, the admin dashboard, or the
+// router's loopback services through the proxy -- including the proxy's own
+// listener (Host: 127.0.0.1:8080), which loops until it runs out of file
+// descriptors. It runs after DNS resolution, so a public name that resolves to
+// a private address is refused too.
+func denyPrivate(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("refusing to dial %s: not an IP address", address)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Errorf("refusing to dial %s: private or local address", address)
+	}
+	return nil
+}
+
+// wsDialAddr adds the scheme's default port: browsers omit it from the Host
+// header, and net.Dial rejects an address without one.
+func wsDialAddr(host, scheme string) string {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	port := "443"
+	if scheme == "http" {
+		port = "80"
+	}
+	return net.JoinHostPort(strings.Trim(host, "[]"), port)
+}
 
 type cappedBuffer struct {
 	buf []byte

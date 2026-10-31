@@ -26,8 +26,17 @@ type CA struct {
 	leafDays int
 
 	mu    sync.Mutex
-	cache map[string]*tls.Certificate
+	cache map[string]cachedLeaf
 }
+
+type cachedLeaf struct {
+	cert    *tls.Certificate
+	renewAt time.Time
+}
+
+// maxLeafCache bounds memory: SNI is client-controlled, so the cache must not
+// grow without limit.
+const maxLeafCache = 4096
 
 func loadCA(certPath, keyPath string, leafDays int) (*CA, error) {
 	cb, err := os.ReadFile(certPath)
@@ -71,14 +80,15 @@ func loadCA(certPath, keyPath string, leafDays int) (*CA, error) {
 	if !cert.IsCA {
 		return nil, fmt.Errorf("CA certificate is not a CA")
 	}
-	return &CA{cert: cert, key: key, leafDays: leafDays, cache: map[string]*tls.Certificate{}}, nil
+	return &CA{cert: cert, key: key, leafDays: leafDays, cache: map[string]cachedLeaf{}}, nil
 }
 
 func (c *CA) leaf(host string) (*tls.Certificate, error) {
+	now := time.Now()
 	c.mu.Lock()
-	if lc, ok := c.cache[host]; ok {
+	if lc, ok := c.cache[host]; ok && now.Before(lc.renewAt) {
 		c.mu.Unlock()
-		return lc, nil
+		return lc.cert, nil
 	}
 	c.mu.Unlock()
 
@@ -90,12 +100,12 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	notAfter := now.AddDate(0, 0, c.leafDays)
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: host},
 		NotBefore:             now.Add(-2 * time.Hour),
-		NotAfter:              now.AddDate(0, 0, c.leafDays),
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -111,7 +121,12 @@ func (c *CA) leaf(host string) (*tls.Certificate, error) {
 	}
 	lc := &tls.Certificate{Certificate: [][]byte{der, c.cert.Raw}, PrivateKey: key}
 	c.mu.Lock()
-	c.cache[host] = lc
+	if len(c.cache) >= maxLeafCache {
+		c.cache = map[string]cachedLeaf{}
+	}
+	// Re-mint at half-life so a long-running proxy never serves a cached leaf
+	// past its NotAfter (leaf_days is 7; the router routinely stays up longer).
+	c.cache[host] = cachedLeaf{cert: lc, renewAt: now.Add(notAfter.Sub(now) / 2)}
 	c.mu.Unlock()
 	return lc, nil
 }

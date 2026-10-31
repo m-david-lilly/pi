@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,9 +26,9 @@ func queryCmd(args []string) {
 	q := fs.String("q", "", "substring match on URL/snippet/title/query")
 	_ = fs.Parse(args)
 
-	dur, err := time.ParseDuration(*since)
+	dur, err := parseSince(*since)
 	if err != nil {
-		dur = 24 * time.Hour
+		fail(err)
 	}
 	if *limit <= 0 || *limit > 5000 {
 		*limit = 100
@@ -158,6 +159,24 @@ func queryCmd(args []string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", " ")
 	_ = enc.Encode(out)
+}
+
+// parseSince accepts Go durations (24h, 90m) plus whole days (7d), which the
+// docs use. An unparsable value is an error, not a silent 24h window.
+func parseSince(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid --since %q (use e.g. 24h, 90m or 7d)", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --since %q (use e.g. 24h, 90m or 7d)", s)
+	}
+	return d, nil
 }
 
 func isTimeCol(c string) bool {

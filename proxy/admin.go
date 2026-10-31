@@ -74,9 +74,9 @@ func statsCmd(args []string) {
 	since := fs.String("since", "24h", "lookback window")
 	_ = fs.Parse(args)
 
-	dur, err := time.ParseDuration(*since)
+	dur, err := parseSince(*since)
 	if err != nil {
-		dur = 24 * time.Hour
+		fail(err)
 	}
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", *dbPath))
 	if err != nil {

@@ -18,13 +18,22 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-SRC=${SRC:-$(cd "$(dirname "$0")" && pwd)}
+# Default to the repo root (this script lives in <repo>/scripts).
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 [ -f /etc/openwrt_release ] || { echo "run this on the router" >&2; exit 1; }
 
 log() { logger -t kids-setup "$*"; echo "[kids-setup] $*"; }
 die() { echo "[kids-setup] ERROR: $*" >&2; exit 1; }
 
-put() { cp "$1" "$2" && chmod "$3" "$2" || die "cannot install $1"; }
+# put SRC DST MODE. On a re-run the source falls back to the installed copy, so
+# SRC may be DST itself (cp refuses "same file") or absent while DST exists.
+put() {
+	if [ "$1" = "$2" ] || { [ ! -f "$1" ] && [ -f "$2" ]; }; then
+		chmod "$3" "$2" || die "cannot chmod $2"
+		return 0
+	fi
+	cp "$1" "$2" && chmod "$3" "$2" || die "cannot install $1"
+}
 
 # ---- 1. source files -------------------------------------------------------
 BIN="$SRC/proxy/dist/kidproxy"
@@ -107,11 +116,20 @@ uci set dhcp.kids.force='1'
 uci -q delete dhcp.kids.dhcp_option
 uci add_list dhcp.kids.dhcp_option='3,192.168.30.1'
 uci add_list dhcp.kids.dhcp_option='6,192.168.30.1'
+# The CA install page also answers to config.yaml's gateway_names; without a
+# local record those names do not resolve.
+for name in setup.kids kidproxy.lan; do
+	uci -q del_list "dhcp.@dnsmasq[0].address=/$name/192.168.30.1"
+	uci add_list "dhcp.@dnsmasq[0].address=/$name/192.168.30.1"
+done
 uci commit network
 uci commit dhcp
 
 # ---- 6. wireless (kids-only SSID on the onboard radio) ---------------------
 if uci -q get wireless.radio0 >/dev/null; then
+	# The world (00) regdomain marks 5 GHz ch36 no-IR, so the AP will not start
+	# without a country. Keep an existing one; set yours if you are not in the US.
+	uci -q get wireless.radio0.country >/dev/null || uci set wireless.radio0.country='US'
 	uci set wireless.radio0.band='5g'
 	uci set wireless.radio0.channel='36'
 	uci set wireless.radio0.htmode='VHT80'
@@ -173,12 +191,54 @@ uci set firewall.kids_ping.src='kids'
 uci set firewall.kids_ping.proto='icmp'
 uci set firewall.kids_ping.icmp_type='echo-request'
 uci set firewall.kids_ping.target='ACCEPT'
+
+# DNS-filter baseline enforced by fw4 itself, so it holds while the kidproxy
+# nft table is flushed (pause, toggle, failed load). The live box may hold these
+# as anonymous sections, so skip any rule that already exists by name.
+fw_has() { uci show firewall 2>/dev/null | grep -q "\.name='$1'\$"; }
+if ! fw_has Kids-Force-DNS; then
+	uci set firewall.kids_force_dns=redirect
+	uci set firewall.kids_force_dns.name='Kids-Force-DNS'
+	uci set firewall.kids_force_dns.src='kids'
+	uci set firewall.kids_force_dns.src_dport='53'
+	uci set firewall.kids_force_dns.dest_port='53'
+	uci set firewall.kids_force_dns.proto='tcp udp'
+	uci set firewall.kids_force_dns.target='DNAT'
+fi
+if ! fw_has Kids-Block-DoT; then
+	uci set firewall.kids_block_dot=rule
+	uci set firewall.kids_block_dot.name='Kids-Block-DoT'
+	uci set firewall.kids_block_dot.src='kids'
+	uci set firewall.kids_block_dot.dest='wan'
+	uci set firewall.kids_block_dot.proto='tcp udp'
+	uci set firewall.kids_block_dot.dest_port='853'
+	uci set firewall.kids_block_dot.target='REJECT'
+fi
+if ! fw_has Kids-Block-VPN-TCP; then
+	uci set firewall.kids_block_vpn_tcp=rule
+	uci set firewall.kids_block_vpn_tcp.name='Kids-Block-VPN-TCP'
+	uci set firewall.kids_block_vpn_tcp.src='kids'
+	uci set firewall.kids_block_vpn_tcp.dest='wan'
+	uci set firewall.kids_block_vpn_tcp.proto='tcp'
+	uci set firewall.kids_block_vpn_tcp.dest_port='1194 1723 1701 5000 9001 9030 9050 9051'
+	uci set firewall.kids_block_vpn_tcp.target='REJECT'
+fi
+if ! fw_has Kids-Block-VPN-UDP; then
+	uci set firewall.kids_block_vpn_udp=rule
+	uci set firewall.kids_block_vpn_udp.name='Kids-Block-VPN-UDP'
+	uci set firewall.kids_block_vpn_udp.src='kids'
+	uci set firewall.kids_block_vpn_udp.dest='wan'
+	uci set firewall.kids_block_vpn_udp.proto='udp'
+	uci set firewall.kids_block_vpn_udp.dest_port='1194 1701 4500 51820'
+	uci set firewall.kids_block_vpn_udp.target='REJECT'
+fi
 uci commit firewall
 
 # ---- 8. apply + start ------------------------------------------------------
 log "reloading network, firewall, wireless"
 /etc/init.d/network reload
 sleep 2
+/etc/init.d/dnsmasq reload
 /etc/init.d/firewall reload
 wifi reload 2>/dev/null || wifi up
 

@@ -109,6 +109,9 @@ alert:
   late_night: true
   late_night_from: 23
   late_night_to: 6
+  # IANA zone the late-night hours are measured in, e.g. America/Los_Angeles.
+  # The router clock is UTC, so empty means 23:00-06:00 *UTC*.
+  timezone: ""
 
 notify:
   email:

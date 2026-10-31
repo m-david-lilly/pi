@@ -183,10 +183,17 @@ func (s *Store) writeEvent(ev *Event) error {
 	}
 
 	if ev.Video != nil && ev.Video.VideoID != "" {
+		// Most hits for a video carry only its ID (watch-page reloads, caption
+		// fetches); keep the title/channel/length learned from the player
+		// response instead of blanking them.
 		_, _ = s.db.Exec(`INSERT INTO youtube (ts,device,video_id,title,channel,seconds,query,url)
 			VALUES (?,?,?,?,?,?,?,?)
-			ON CONFLICT(video_id,device) DO UPDATE SET title=excluded.title, channel=excluded.channel,
-			  seconds=excluded.seconds, query=excluded.query, ts=excluded.ts`,
+			ON CONFLICT(video_id,device) DO UPDATE SET
+			  title=COALESCE(NULLIF(excluded.title,''), title),
+			  channel=COALESCE(NULLIF(excluded.channel,''), channel),
+			  seconds=CASE WHEN excluded.seconds > 0 THEN excluded.seconds ELSE seconds END,
+			  query=COALESCE(NULLIF(excluded.query,''), query),
+			  ts=excluded.ts`,
 			ts, ev.Device, ev.Video.VideoID, ev.Video.Title, ev.Video.Channel,
 			ev.Video.Seconds, ev.Video.Query, ev.URL)
 	}
@@ -240,13 +247,20 @@ func (s *Store) allowAlert(key string, ts time.Time) bool {
 	return true
 }
 
+// prune applies retention_days to every table that records browsing history,
+// not just events: searches, videos and visited hosts are the most sensitive.
 func (s *Store) prune() {
 	cutoff := time.Now().AddDate(0, 0, -s.cfg.Retention).Unix()
-	if _, err := s.db.Exec(`DELETE FROM events WHERE ts < ?`, cutoff); err != nil {
-		log.Printf("store: prune events: %v", err)
-	}
-	if _, err := s.db.Exec(`DELETE FROM alerts WHERE ts < ?`, cutoff); err != nil {
-		log.Printf("store: prune alerts: %v", err)
+	for _, q := range []string{
+		`DELETE FROM events WHERE ts < ?`,
+		`DELETE FROM alerts WHERE ts < ?`,
+		`DELETE FROM youtube WHERE ts < ?`,
+		`DELETE FROM searches WHERE ts < ?`,
+		`DELETE FROM domains WHERE last_ts < ?`,
+	} {
+		if _, err := s.db.Exec(q, cutoff); err != nil {
+			log.Printf("store: prune: %v", err)
+		}
 	}
 }
 
