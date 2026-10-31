@@ -163,6 +163,19 @@ returned 500 while the *repo* copy looked fine. `.gitattributes` now forces
 `text eol=lf` on `www/cgi-bin/*` and `www/*.html`. Check with
 `git ls-files --eol www/` (want `w/lf`) before blaming the script.
 
+### 14. In ash, `break` outside a loop is a no-op — use `return` in case branches
+Verified on the router: in a function, `case x in x) echo one; break ;; esac; echo
+two` prints **`one` and `two`**. BusyBox ash does not treat a case branch as a
+breakable context, so `break` silently does nothing and the function keeps running.
+Every "abort this POST action" guard in `handle_post_with_data` used `break`, which
+meant each rejected request emitted **two** JSON bodies (the client parsed the
+first, so it looked like a normal 200) *and* then executed the action anyway —
+`kids_pause 9999` really paused filtering, and `change_password` with a wrong
+current password really rewrote the credentials. All 11 sites now `return` (the
+`break`s that remain in `scripts/*.sh` are inside `while` loops, which is fine).
+Guard against it with `Select-String -Path www/cgi-bin/admin -Pattern '\bbreak\b'`
+(want no hits) and `sh -n /www/cgi-bin/admin` on the Pi.
+
 ---
 
 ## Accessing the Pi

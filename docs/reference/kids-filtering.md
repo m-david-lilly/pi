@@ -348,6 +348,7 @@ To cut wear on a card you intend to keep:
 | Dashboard shows `Not filtering` | `kids-toggle.sh status`; usually `nft=absent` after a manual `fw4 reload` or a pause. `kids-nft.sh apply` restores it. |
 | Hundreds of `tls-pin` alerts | A pinned app. `kidproxy alerts clear --kind tls-pin`; the proxy now dedupes per hour. |
 | CGI returns 500 / `syntax error` | `www/cgi-bin/admin` was saved with CRLF. `.gitattributes` forces LF; check `git ls-files --eol www/`. |
+| A POST returns two JSON bodies, or an invalid value is still applied | A `break` in a `case` branch — a silent no-op in BusyBox ash outside a loop. Must be `return`; see `AGENTS.md` trap #14. |
 | Proxy won't start | `kidproxy check --config /etc/kidproxy/config.yaml`, then `logread \| grep kidproxy`. |
 
 Useful checks (from the Pi):
