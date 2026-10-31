@@ -1595,6 +1595,7 @@ common Surfshark city codes; unknown codes fall back to a generated label.
 | Reload firewall after config change | `fw4 reload` |
 | Check active nftables port-forward rules | `nft list ruleset \| grep 32400` |
 | Tailscale peers / advertised routes | `tailscale status` / `tailscale debug prefs` |
+| Upgrade Tailscale (fails "No space left on device") | fetch → `apk del` → install local `.apk` → `apk add tailscale` — see 11.5 |
 | Plex: is a client local or relayed? | `curl -s http://10.0.0.4:32400/status/sessions \| grep -o 'local="[01]" relayed="[01]"'` |
 | Plex: did plex.tv reject the connection list? | grep the PMS log for `403 response from PUT https://servers.plex.tv/devices` (see Phase 12.7) |
 
@@ -1673,6 +1674,64 @@ then reach 192.168.1.x devices directly. Plex sees them as local clients.
 > subnet over the tailnet (e.g. the Plex server at `10.0.0.4`) requires that host to
 > advertise its own subnet as a second subnet router — see Phase 12.7, which also
 > explains why Tailscale's CGNAT addressing makes this mandatory for Plex specifically.
+
+### 11.5 Upgrading Tailscale (overlay too small for an in-place upgrade)
+
+> **As-built (2026-10-31, 1.98.3 → 1.104.1):** `apk add --upgrade tailscale` (and the
+> dashboard's package-update button) fails with
+> `failed to extract usr/sbin/tailscaled: No space left on device`.
+
+**Why:** the overlay (`/overlay`, the writable layer) is only **~82 MB** — the
+Firmware-Selector image's default, never expanded on the 32 GB SD. `tailscaled` is a
+single ~25 MB binary living in the overlay, and apk extracts the new ~26 MB binary
+*next to* the old one before swapping, so it needs ~26 MB free at once. With other
+packages installed the overlay had only ~18.7 MB free. apk rolls the failed upgrade
+back cleanly (old version keeps running), so the failure is harmless but blocking.
+
+**Workaround — fetch first, remove, then install from the local file.** Removing the
+old package frees its ~25 MB; downloading to `/tmp` (RAM, ~1.9 GB) first guarantees
+the new package is on hand before anything is removed. Tailscale on the Pi is down
+for ~1 minute (remote access *through the Pi* only — Scadrial's own `10.0.0.0/24`
+subnet route for Plex is unaffected).
+
+```bash
+mkdir -p /tmp/ts-upgrade && cd /tmp/ts-upgrade
+apk update
+apk fetch tailscale                         # new .apk into /tmp, nothing removed yet
+ls -l tailscale-*.apk                       # confirm it downloaded
+
+# Back up config + node identity (tailscaled.state) so the Pi stays the same node
+tar -czf backup.tgz /etc/config/tailscale /etc/tailscale
+
+/etc/init.d/tailscale stop
+apk del tailscale                           # frees ~25 MB of overlay (also drops kmod-tun)
+apk add --allow-untrusted ./tailscale-*.apk # pulls kmod-tun back in
+
+# Restore only if the removal took the config/state with it
+[ -f /etc/config/tailscale ] && [ -f /etc/tailscale/tailscaled.state ] \
+  || tar -xzf backup.tgz -C /
+
+/etc/init.d/tailscale enable
+/etc/init.d/tailscale start
+
+# Installing from a local file pins /etc/apk/world to that exact build
+# (`tailscale><hash>`), which blocks future upgrades. Re-add by name to unpin:
+apk add tailscale
+grep '^tailscale' /etc/apk/world            # should be just: tailscale
+
+tailscale version                           # new version
+tailscale status                            # Pi is still "openwrt" (100.112.209.40), no re-login
+cd / && rm -rf /tmp/ts-upgrade
+```
+
+In practice the config and state survived `apk del` and no restore or re-login was
+needed. The `--accept-routes is false` health warning afterwards is expected — the Pi
+reaches `10.0.0.0/24` over the LAN and doesn't need Scadrial's advertised route.
+
+> **This will recur** for any package whose new files are larger than the overlay's
+> free space. The permanent fix is a bigger overlay — expand the rootfs/overlay on the
+> SD, or (better) do it as part of the planned move to NVMe/USB-SSD. Check headroom
+> before large upgrades with `df -h /overlay`.
 
 ---
 
