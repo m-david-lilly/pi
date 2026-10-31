@@ -214,3 +214,38 @@ config rule
 	option icmp_type 'echo-request'
 	option target 'ACCEPT'
 
+# DNS-filter baseline, enforced by fw4 itself so it holds even when the
+# kidproxy nft table is flushed (pause, toggle, failed load): every kids DNS
+# query goes to the Pi's dnsmasq/adblock, and DoT/VPN/Tor are refused.
+config redirect
+	option name 'Kids-Force-DNS'
+	option src 'kids'
+	option src_dport '53'
+	option dest_port '53'
+	option proto 'tcp udp'
+	option target 'DNAT'
+
+config rule
+	option name 'Kids-Block-DoT'
+	option src 'kids'
+	option dest 'wan'
+	option proto 'tcp udp'
+	option dest_port '853'
+	option target 'REJECT'
+
+config rule
+	option name 'Kids-Block-VPN-TCP'
+	option src 'kids'
+	option dest 'wan'
+	option proto 'tcp'
+	option dest_port '1194 1723 1701 5000 9001 9030 9050 9051'
+	option target 'REJECT'
+
+config rule
+	option name 'Kids-Block-VPN-UDP'
+	option src 'kids'
+	option dest 'wan'
+	option proto 'udp'
+	option dest_port '1194 1701 4500 51820'
+	option target 'REJECT'
+
