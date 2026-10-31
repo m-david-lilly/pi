@@ -11,8 +11,10 @@ set -u
 
 PAUSE_FILE=/etc/kidproxy/pause_until
 
-wifi_iface_state() {
-	[ "$(uci -q get wireless.kids.disabled)" = "0" ] && echo 1 || echo 0
+do_resume() {
+	rm -f "$PAUSE_FILE"
+	/usr/bin/kids-nft.sh apply
+	logger -t kids "$1"
 }
 
 case "${1:-status}" in
@@ -45,9 +47,7 @@ pause)
 	echo "filtering paused for ${mins} min"
 	;;
 resume)
-	rm -f "$PAUSE_FILE"
-	/usr/bin/kids-nft.sh apply
-	logger -t kids "filtering resumed"
+	do_resume "filtering resumed"
 	echo "filtering resumed"
 	;;
 resume-if-due)
@@ -55,17 +55,13 @@ resume-if-due)
 	now=$(date +%s)
 	until_ts=$(cat "$PAUSE_FILE" 2>/dev/null || echo 0)
 	[ "$until_ts" -gt "$now" ] 2>/dev/null && exit 0
-	rm -f "$PAUSE_FILE"
-	/usr/bin/kids-nft.sh apply
-	logger -t kids "filtering resumed after pause"
+	do_resume "filtering resumed after pause"
 	;;
 status)
-	echo "enabled=$(wifi_iface_state)"
-	if pidof kidproxy >/dev/null 2>&1; then
-		echo "proxy=running"
-	else
-		echo "proxy=stopped"
-	fi
+	[ "$(uci -q get wireless.kids.disabled)" = "0" ] && enabled=1 || enabled=0
+	echo "enabled=$enabled"
+	pidof kidproxy >/dev/null 2>&1 && proxy=running || proxy=stopped
+	echo "proxy=$proxy"
 	echo "nft=$(/usr/bin/kids-nft.sh status)"
 	pause_until=$(cat "$PAUSE_FILE" 2>/dev/null || echo 0)
 	echo "pause_until=$pause_until"

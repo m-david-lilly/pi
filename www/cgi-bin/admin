@@ -460,31 +460,38 @@ get_vpn_raw() {
 
 get_kids() {
 	send_json
-	kids_json_raw
+	kids_json_raw "$1"
+}
+
+# kidproxy query wrapper: prints [] when the query fails or returns nothing.
+kids_query() {
+	_out=$(/usr/bin/kidproxy query "$@" 2>/dev/null)
+	echo "${_out:-[]}"
 }
 
 # One JSON object for the Kids panel: toggle state plus a small window of the
 # proxy's own log, so the dashboard never parses shell output.
+# $1 = optional event search term (already restricted to [A-Za-z0-9._-]).
 kids_json_raw() {
-	status_raw=$(/usr/bin/kids-toggle.sh status 2>/dev/null)
-	enabled=$(echo "$status_raw" | sed -n 's/^enabled=//p')
-	proxy=$(echo "$status_raw" | sed -n 's/^proxy=//p')
-	nft=$(echo "$status_raw" | sed -n 's/^nft=//p')
-	pause_until=$(echo "$status_raw" | sed -n 's/^pause_until=//p')
+	q="${1:-}"
+	enabled= proxy= nft= pause_until=
+	while IFS='=' read -r k v; do
+		case "$k" in
+			enabled) enabled=$v ;;
+			proxy) proxy=$v ;;
+			nft) nft=$v ;;
+			pause_until) pause_until=$v ;;
+		esac
+	done <<-EOF
+	$(/usr/bin/kids-toggle.sh status 2>/dev/null)
+	EOF
 	ssid=$(uci -q get wireless.kids.ssid 2>/dev/null | tr -d '"\\')
 
 	stats=$(/usr/bin/kidproxy stats 2>/dev/null)
-	[ -z "$stats" ] && stats='{}'
-	alerts=$(/usr/bin/kidproxy query --kind alerts --limit 10 2>/dev/null)
-	[ -z "$alerts" ] && alerts='[]'
-	if [ -n "${KIDS_Q:-}" ]; then
-		events=$(/usr/bin/kidproxy query --kind events --limit 25 --q "$KIDS_Q" 2>/dev/null)
-	else
-		events=$(/usr/bin/kidproxy query --kind events --limit 25 2>/dev/null)
-	fi
-	[ -z "$events" ] && events='[]'
-	rules=$(/usr/bin/kidproxy query --kind rules --limit 50 2>/dev/null)
-	[ -z "$rules" ] && rules='[]'
+	[ -n "$stats" ] || stats='{}'
+	alerts=$(kids_query --kind alerts --limit 10)
+	events=$(kids_query --kind events --limit 25 ${q:+--q "$q"})
+	rules=$(kids_query --kind rules --limit 50)
 
 	cat <<-EOF
 	{
@@ -493,7 +500,7 @@ kids_json_raw() {
 		"nft": "${nft:-absent}",
 		"pause_until": ${pause_until:-0},
 		"ssid": "${ssid:-}",
-		"query": "${KIDS_Q:-}",
+		"query": "$q",
 		"stats": $stats,
 		"alerts": $alerts,
 		"events": $events,
@@ -608,20 +615,12 @@ handle_post_with_data() {
 				echo '{"ok":false,"message":"wan-weight.sh not found"}'
 			fi
 			;;
-		kids_on)
+		kids_on|kids_off)
 			send_json
+			mode=${action#kids_}
 			if [ -x /usr/bin/kids-toggle.sh ]; then
-				/usr/bin/kids-toggle.sh on >/dev/null 2>&1 &
-				echo '{"ok":true,"message":"Kids network turning on"}'
-			else
-				echo '{"ok":false,"message":"kids-toggle.sh not found"}'
-			fi
-			;;
-		kids_off)
-			send_json
-			if [ -x /usr/bin/kids-toggle.sh ]; then
-				/usr/bin/kids-toggle.sh off >/dev/null 2>&1 &
-				echo '{"ok":true,"message":"Kids network turning off"}'
+				/usr/bin/kids-toggle.sh "$mode" >/dev/null 2>&1 &
+				echo "{\"ok\":true,\"message\":\"Kids network turning $mode\"}"
 			else
 				echo '{"ok":false,"message":"kids-toggle.sh not found"}'
 			fi
@@ -634,13 +633,19 @@ handle_post_with_data() {
 				echo '{"ok":false,"message":"minutes must be 1-720"}'
 				return
 			fi
-			/usr/bin/kids-toggle.sh pause "$minutes" >/dev/null 2>&1
-			echo "{\"ok\":true,\"message\":\"Filtering paused for $minutes min\"}"
+			if /usr/bin/kids-toggle.sh pause "$minutes" >/dev/null 2>&1; then
+				echo "{\"ok\":true,\"message\":\"Filtering paused for $minutes min\"}"
+			else
+				echo '{"ok":false,"message":"could not pause filtering"}'
+			fi
 			;;
 		kids_resume)
 			send_json
-			/usr/bin/kids-toggle.sh resume >/dev/null 2>&1
-			echo '{"ok":true,"message":"Filtering resumed"}'
+			if /usr/bin/kids-toggle.sh resume >/dev/null 2>&1; then
+				echo '{"ok":true,"message":"Filtering resumed"}'
+			else
+				echo '{"ok":false,"message":"could not resume filtering"}'
+			fi
 			;;
 		kids_rule)
 			send_json
@@ -860,7 +865,6 @@ case "$REQUEST_METHOD" in
 	GET)
 		check_auth
 		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([a-z0-9]*\).*/\1/p')
-		kids_q=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]q=\([A-Za-z0-9._-]*\).*/\1/p')
 		case "$section" in
 			system)  get_system ;;
 			wan)     get_wan ;;
@@ -868,7 +872,7 @@ case "$REQUEST_METHOD" in
 			adblock) get_adblock ;;
 			dns)     get_dns ;;
 			vpn)     get_vpn ;;
-			kids)    KIDS_Q="$kids_q"; get_kids ;;
+			kids)    get_kids "$(echo "&$QUERY_STRING" | sed -n 's/.*&q=\([A-Za-z0-9._-]*\).*/\1/p')" ;;
 			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;
