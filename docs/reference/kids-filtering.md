@@ -76,6 +76,14 @@ uci commit wireless && wifi reload
 # ...then bridge the kids VLAN/SSID on the external AP onto 192.168.30.0/24
 ```
 
+The dashboard's **Kids WiFi** card manages the passphrase only while the Pi's own
+radio serves the network. It treats the network as external — and hides the
+password controls — when `wireless.kids.disabled='1'` **and** `network.brkids` has a
+port (the uplink to the other AP). A Pi SSID that is merely turned off still counts
+as the Pi's; a new password applies when it is turned back on. Changing it updates
+`wireless.kids.key` and `/etc/kidproxy/wifi.key` (so a `kids-setup.sh` re-run keeps
+it) and reloads only the kids radio — every kids device must rejoin.
+
 Everything else (nft redirect, DHCP, DNS, proxy) keys off `br-kids` and
 `192.168.30.0/24`, so a different AP only has to deliver those clients into that
 subnet.

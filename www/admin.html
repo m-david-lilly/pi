@@ -563,6 +563,22 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
     <div class="actions" id="upd-actions"></div>
   </div>
 
+  <!-- Kids WiFi (password managed here only when the Pi's own AP serves it) -->
+  <div class="card" id="kwifi-card">
+    <h2>Kids WiFi <span class="badge" id="kwifi-badge"></span></h2>
+    <div id="kwifi-body"><span class="loading">Loading...</span></div>
+    <div id="kwifi-form" style="display:none">
+      <div class="kids-rule-form">
+        <input id="kwifi-pw" type="password" placeholder="New password (8-63 characters)" autocomplete="new-password" maxlength="63">
+        <input id="kwifi-pw2" type="password" placeholder="Confirm new password" autocomplete="new-password" maxlength="63">
+      </div>
+      <div class="actions">
+        <button class="btn btn-green" onclick="kwifiChange()">Change password</button>
+        <button class="btn" id="kwifi-reveal-btn" onclick="kwifiReveal()">Show current password</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Kids bedtime schedules -->
   <div class="card card-wide" id="sched-card">
     <h2>Bedtimes &amp; Time Limits <span class="badge" id="sched-badge"></span></h2>
@@ -1070,6 +1086,7 @@ function showApp() {
   fetchAll();
   fetchUpdates();
   fetchSchedule();
+  fetchKidsWifi();
   refreshTimer = setInterval(fetchAll, 10000);
   // Schedules change rarely; refresh the blocked-now status once a minute.
   setInterval(fetchSchedule, 60000);
@@ -1384,6 +1401,74 @@ function confirmReboot() {
   }
 }
 
+// ── Kids WiFi ────────────────────────────────────────────────
+
+const KWIFI_SECURITY = {'sae-mixed': 'WPA2/WPA3', 'sae': 'WPA3', 'psk2': 'WPA2', 'psk-mixed': 'WPA/WPA2', 'none': 'Open'};
+
+function fetchKidsWifi() {
+  fetch(API + '?section=kidswifi')
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(renderKidsWifi)
+    .catch(function(err) {
+      if (err.message !== 'auth') console.error('kids wifi fetch:', err);
+    });
+}
+
+function renderKidsWifi(d) {
+  var badge = document.getElementById('kwifi-badge');
+  var body = document.getElementById('kwifi-body');
+  var form = document.getElementById('kwifi-form');
+  if (!d.managed) {
+    badge.textContent = 'External AP';
+    badge.className = 'badge badge-warn';
+    body.innerHTML = statRow('Access point', 'Another access point' + (d.external_ports ? ' (' + esc(d.external_ports) + ')' : '')) +
+      '<div class="sched-note">The kids network is served by a different access point, so its WiFi password is managed on that device, not here.</div>';
+    form.style.display = 'none';
+    return;
+  }
+  badge.textContent = d.on ? 'On' : 'Off';
+  badge.className = 'badge ' + (d.on ? 'badge-up' : 'badge-down');
+  body.innerHTML =
+    statRow('Network name', esc(d.ssid || '—')) +
+    statRow('Security', esc(KWIFI_SECURITY[d.encryption] || d.encryption || '—')) +
+    statRow('Access point', 'This Pi (5 GHz)') +
+    (d.on ? '' : '<div class="sched-note">The kids WiFi is currently off; a new password applies when it is turned on.</div>');
+  form.style.display = 'block';
+}
+
+function kwifiChange() {
+  var pw = document.getElementById('kwifi-pw').value;
+  var pw2 = document.getElementById('kwifi-pw2').value;
+  if (pw.length < 8 || pw.length > 63) { showToast('Password must be 8-63 characters'); return; }
+  if (!/^[\x20-\x7e]+$/.test(pw)) { showToast('Use printable characters only (no emoji or accents)'); return; }
+  if (pw !== pw2) { showToast('Passwords do not match'); return; }
+  if (!confirm('Change the kids WiFi password? Every kids device will disconnect and must rejoin with the new password.')) return;
+  postAction({action: 'kids_wifi_password', password: pw});
+  document.getElementById('kwifi-pw').value = '';
+  document.getElementById('kwifi-pw2').value = '';
+}
+
+// Shows the current passphrase on the button for 20 s; never kept in the page.
+function kwifiReveal() {
+  var btn = document.getElementById('kwifi-reveal-btn');
+  fetch(API, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'kids_wifi_reveal'})})
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(d) {
+      if (!d.ok) { showToast(d.message || 'Could not read password'); return; }
+      btn.textContent = d.password;
+      setTimeout(function() { btn.textContent = 'Show current password'; }, 20000);
+    })
+    .catch(function(err) {
+      if (err.message !== 'auth') showToast('Error: ' + err.message);
+    });
+}
+
 // ── Bedtime schedules ────────────────────────────────────────
 
 const SCHED_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
@@ -1606,6 +1691,7 @@ function postAction(action) {
       setTimeout(function() { fetchAll(); if (kidsQuery) fetchKids(); }, 2000);
       // Schedule edits apply immediately on the Pi; redraw the card right away.
       if (/^sched_/.test(payload.action)) fetchSchedule(true);
+      if (/^kids_(on|off|wifi_)/.test(payload.action)) setTimeout(fetchKidsWifi, 2000);
     })
     .catch(function(err) {
       if (err.message !== 'auth') showToast('Error: ' + err.message);

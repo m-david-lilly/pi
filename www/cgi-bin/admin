@@ -509,6 +509,30 @@ kids_json_raw() {
 	EOF
 }
 
+# ── Kids WiFi (the Pi's own AP for the kids network) ───────────────
+
+KIDS_WIFI_KEYFILE=/etc/kidproxy/wifi.key
+
+# The kids network is served by the Pi's own radio when wireless.kids exists and
+# is either enabled or the only way onto br-kids. If it is disabled and br-kids
+# has a wired uplink (an external AP, see kids-filtering.md "Choosing a different
+# access point"), the password lives on that AP and is not managed here.
+kids_wifi_managed() {
+	[ "$(uci -q get wireless.kids)" = "wifi-iface" ] || return 1
+	[ "$(uci -q get wireless.kids.disabled)" = "1" ] && [ -n "$(uci -q get network.brkids.ports)" ] && return 1
+	return 0
+}
+
+get_kidswifi() {
+	send_json
+	ssid=$(uci -q get wireless.kids.ssid | tr -cd 'A-Za-z0-9 ._-')
+	enc=$(uci -q get wireless.kids.encryption | tr -cd 'a-z0-9+-')
+	ports=$(uci -q get network.brkids.ports | tr -cd 'A-Za-z0-9 ._-')
+	[ "$(uci -q get wireless.kids.disabled)" = "1" ] && on=0 || on=1
+	if kids_wifi_managed; then managed=true; else managed=false; fi
+	echo "{\"managed\":$managed,\"ssid\":\"$ssid\",\"encryption\":\"$enc\",\"on\":$on,\"external_ports\":\"$ports\"}"
+}
+
 # ── Kids bedtime schedules (/etc/config/kids_schedule) ─────────────
 
 SCHED_SCRIPT=/usr/bin/kids-schedule.sh
@@ -743,6 +767,31 @@ handle_post_with_data() {
 			else
 				echo '{"ok":false,"message":"could not remove rule"}'
 			fi
+			;;
+		kids_wifi_password)
+			send_json
+			kids_wifi_managed || { echo '{"ok":false,"message":"the kids network uses another access point; change its password there"}'; return; }
+			pw=$(echo "$POSTDATA" | jsonfilter -e '@.password' 2>/dev/null)
+			# WPA passphrase: 8-63 printable ASCII characters.
+			case "$pw" in *[!\ -~]*) echo '{"ok":false,"message":"use printable characters only (no emoji or accents)"}'; return ;; esac
+			if [ ${#pw} -lt 8 ] || [ ${#pw} -gt 63 ]; then
+				echo '{"ok":false,"message":"password must be 8-63 characters"}'
+				return
+			fi
+			uci set "wireless.kids.key=$pw"
+			uci commit wireless
+			# Keep kids-setup.sh's copy in sync so a re-run cannot restore the old key.
+			mkdir -p "${KIDS_WIFI_KEYFILE%/*}"
+			( umask 077; printf '%s\n' "$pw" > "$KIDS_WIFI_KEYFILE" )
+			# Reload after replying: kids devices drop and must rejoin with the new key.
+			( sleep 1; wifi reload "$(uci -q get wireless.kids.device)" ) >/dev/null 2>&1 &
+			echo '{"ok":true,"message":"Kids WiFi password changed. Kids devices must reconnect with the new password."}'
+			;;
+		kids_wifi_reveal)
+			send_json
+			kids_wifi_managed || { echo '{"ok":false,"message":"the kids network uses another access point"}'; return; }
+			pw=$(uci -q get wireless.kids.key | sed 's/\\/\\\\/g; s/"/\\"/g')
+			echo "{\"ok\":true,\"password\":\"$pw\"}"
 			;;
 		sched_kid_add)
 			send_json
@@ -1077,6 +1126,7 @@ case "$REQUEST_METHOD" in
 			vpn)     get_vpn ;;
 			kids)    get_kids "$(echo "&$QUERY_STRING" | sed -n 's/.*&q=\([A-Za-z0-9._-]*\).*/\1/p')" ;;
 			schedule) get_schedule ;;
+			kidswifi) get_kidswifi ;;
 			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;
