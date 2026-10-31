@@ -321,7 +321,7 @@ on every device**. Full checklist: `docs/reference/kids-filtering.md` §12.
   known/accepted debt while VPN is off.
 - **Capacity weighting** works but falls back to 50/50 when librespeed.org's
   server-list endpoint is down (upstream outage); self-corrects on the next cron.
-- **Cosmetic:** Pi timezone is UTC (`GMT0`); set local zone if local-time logs wanted.
+- **Timezone (done 2026-10-30):** Pi is `America/Phoenix` (`MST7`, no DST). Needed by the kids bedtime schedules; cron jobs (adblock 05:00) now run in local time.
 - **Permanent media:** move off the SD to NVMe/USB-SSD for an always-on appliance.
 - **Dashboard: change admin password from default** — credentials are
   `admin`/`admin` in `/etc/piadmin/credentials`. Change via the dashboard's

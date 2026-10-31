@@ -210,7 +210,7 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 .sev-warn { background: rgba(245,158,11,0.15); color: var(--amber); }
 .sev-info { background: rgba(59,130,246,0.15); color: var(--accent); }
 .kids-tools, .kids-rule-form { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.kids-tools input, .kids-rule-form input, .kids-rule-form select, .kids-pause-mins {
+.kids-tools input, .kids-rule-form input, .kids-rule-form select, .kids-pause-mins, .sched-lim {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
@@ -226,6 +226,16 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 .kids-rule .tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 99px; }
 .tag-block { background: rgba(239,68,68,0.15); color: var(--red); }
 .tag-allow { background: rgba(34,197,94,0.15); color: var(--green); }
+.sched-kid { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+.sched-kid.off { opacity: 0.6; }
+.sched-kid-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sched-kid-head .name { font-weight: 600; font-size: 0.95rem; flex: 1; }
+.sched-kid h3 { margin-top: 10px; }
+.sched-days { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.sched-days label { font-size: 0.75rem; display: flex; align-items: center; gap: 3px; cursor: pointer; margin-right: 6px; }
+.kids-rule-form .sched-days input { flex: none; min-width: 0; padding: 0; margin: 0; }
+.sched-form input[type=time] { flex: 0 0 auto; min-width: 0; }
+.sched-note { color: var(--text-dim); font-size: 0.75rem; margin-top: 6px; }
 .mwan-policy { margin-bottom: 10px; }
 .mwan-policy-name {
   font-size: 0.82rem;
@@ -551,6 +561,17 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
     <h2>Package Updates <span class="badge" id="upd-badge"></span></h2>
     <div id="upd-body"><span class="loading">Loading...</span></div>
     <div class="actions" id="upd-actions"></div>
+  </div>
+
+  <!-- Kids bedtime schedules -->
+  <div class="card card-wide" id="sched-card">
+    <h2>Bedtimes &amp; Time Limits <span class="badge" id="sched-badge"></span></h2>
+    <div id="sched-body"><span class="loading">Loading...</span></div>
+    <div class="kids-rule-form">
+      <input id="sched-new-kid" type="text" placeholder="Kid's name" maxlength="32" autocomplete="off"
+             onkeydown="if(event.key==='Enter')schedAddKid()">
+      <button class="btn btn-green" onclick="schedAddKid()">Add kid</button>
+    </div>
   </div>
 
   <!-- Kids network -->
@@ -1048,7 +1069,10 @@ function showApp() {
   document.getElementById('app').style.display = 'block';
   fetchAll();
   fetchUpdates();
+  fetchSchedule();
   refreshTimer = setInterval(fetchAll, 10000);
+  // Schedules change rarely; refresh the blocked-now status once a minute.
+  setInterval(fetchSchedule, 60000);
 }
 
 function showLogin() {
@@ -1360,14 +1384,216 @@ function confirmReboot() {
   }
 }
 
+// ── Bedtime schedules ────────────────────────────────────────
+
+const SCHED_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const SCHED_DAY_LABEL = {sun: 'Sun', mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat'};
+
+// "21:00" -> "9:00 PM"
+function schedTime12(t) {
+  var p = t.split(':'), h = Number(p[0]);
+  return ((h % 12) || 12) + ':' + p[1] + (h < 12 ? ' AM' : ' PM');
+}
+
+// ['sun','mon','tue','wed','thu'] -> "Sun–Thu"; runs of 3+ collapse to a range.
+function schedDaysLabel(days) {
+  var idx = days.map(function(d) { return SCHED_DAYS.indexOf(d); }).sort();
+  if (idx.length === 7) return 'Every day';
+  var parts = [], i = 0;
+  while (i < idx.length) {
+    var j = i;
+    while (j + 1 < idx.length && idx[j + 1] === idx[j] + 1) j++;
+    var a = SCHED_DAY_LABEL[SCHED_DAYS[idx[i]]], b = SCHED_DAY_LABEL[SCHED_DAYS[idx[j]]];
+    if (j - i >= 2) parts.push(a + '–' + b);
+    else for (var k = i; k <= j; k++) parts.push(SCHED_DAY_LABEL[SCHED_DAYS[idx[k]]]);
+    i = j + 1;
+  }
+  return parts.join(', ');
+}
+
+// "sun mon 21:00-07:00" -> "Sun, Mon · 9:00 PM → 7:00 AM next day"
+function schedBlockLabel(b) {
+  var sp = b.lastIndexOf(' '), range = b.slice(sp + 1).split('-');
+  var overnight = range[1] <= range[0];
+  return schedDaysLabel(b.slice(0, sp).split(' ')) + ' · ' + schedTime12(range[0]) +
+    ' → ' + schedTime12(range[1]) + (overnight ? ' next day' : '');
+}
+
+// Redraw unless the parent is mid-edit in the card (a 60 s poll must not wipe
+// a half-filled form). force=true after an action always redraws.
+function fetchSchedule(force) {
+  var card = document.getElementById('sched-card');
+  if (!force && card && card.contains(document.activeElement) &&
+      /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) return;
+  fetch(API + '?section=schedule')
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(renderSchedule)
+    .catch(function(err) {
+      if (err.message !== 'auth') console.error('schedule fetch:', err);
+    });
+}
+
+function renderSchedule(d) {
+  var body = document.getElementById('sched-body');
+  var badge = document.getElementById('sched-badge');
+  var kids = d.kids || [], devices = d.devices || [];
+  var hostByMac = {};
+  devices.forEach(function(dev) { hostByMac[dev.mac] = dev; });
+  var assigned = {};
+  kids.forEach(function(k) { k.macs.forEach(function(m) { assigned[m] = k.name; }); });
+
+  var asleep = kids.filter(function(k) { return k.blocked === 1; }).length;
+  if (!d.installed) { badge.textContent = 'Not running'; badge.className = 'badge badge-down'; }
+  else if (asleep) { badge.textContent = asleep + ' at bedtime'; badge.className = 'badge badge-warn'; }
+  else { badge.textContent = 'Active'; badge.className = 'badge badge-up'; }
+
+  var html = '';
+  if (!d.installed) {
+    html += '<div class="sched-note">The schedule runner is not installed on the Pi, so bedtimes are not enforced. ' +
+      '<button class="btn" onclick="postAction({action:\'sched_install\'})">Enable schedules</button></div>';
+  }
+  html += '<div class="sched-note">Router time: ' + esc(d.now || '—') +
+    '. Bedtimes and limits apply to devices on the kids WiFi only. Limits count minutes with real traffic ' +
+    'to that category and reset at midnight; a limit of 0 blocks the category.</div>';
+
+  if (kids.length === 0) {
+    html += '<div class="kids-empty">No kids yet. Add one below, then assign their devices and bedtimes.</div>';
+  }
+
+  var unassigned = devices.filter(function(dev) { return !assigned[dev.mac]; });
+
+  kids.forEach(function(k) {
+    var id = esc(k.id);
+    var status = !k.enabled ? '<span class="sev">Schedule off</span>'
+      : k.blocked ? '<span class="sev sev-warn">Bedtime now (' + esc(k.window) + ')</span>'
+      : '<span class="sev sev-info">Online allowed</span>';
+    html += '<div class="sched-kid' + (k.enabled ? '' : ' off') + '">' +
+      '<div class="sched-kid-head"><span class="name">' + esc(k.name) + '</span>' + status +
+      '<button class="btn" onclick="schedRename(\'' + id + '\')">Rename</button>' +
+      '<button class="btn" onclick="postAction({action:\'sched_kid_update\',id:\'' + id + '\',enabled:' + (k.enabled ? 0 : 1) + '})">' +
+        (k.enabled ? 'Turn off' : 'Turn on') + '</button>' +
+      '<button class="btn btn-red" onclick="schedRemoveKid(\'' + id + '\')">Remove</button></div>';
+
+    // Devices
+    html += '<h3>Devices</h3>';
+    if (k.macs.length === 0) html += '<div class="kids-empty">No devices yet.</div>';
+    k.macs.forEach(function(m) {
+      var dev = hostByMac[m];
+      html += '<div class="kids-rule"><span class="val">' + esc(dev ? dev.host : 'offline') +
+        ' <span style="color:var(--text-dim)">' + esc(m) + (dev ? ' · ' + esc(dev.ip) : '') + '</span></span>' +
+        '<button class="btn" onclick="postAction({action:\'sched_mac_del\',id:\'' + id + '\',mac:\'' + esc(m) + '\'})">Remove</button></div>';
+    });
+    html += '<div class="kids-rule-form"><select id="sched-dev-' + id + '">' +
+      '<option value="">Pick a device on the kids WiFi…</option>' +
+      unassigned.map(function(dev) {
+        return '<option value="' + esc(dev.mac) + '">' + esc(dev.host) + ' — ' + esc(dev.mac) + ' (' + esc(dev.ip) + ')</option>';
+      }).join('') +
+      '</select><input id="sched-mac-' + id + '" type="text" placeholder="or type a MAC (aa:bb:cc:dd:ee:ff)" autocomplete="off">' +
+      '<button class="btn" onclick="schedAddDevice(\'' + id + '\')">Add device</button></div>';
+
+    // Daily limits, one row per category
+    var limitByCat = {};
+    (k.limits || []).forEach(function(l) { limitByCat[l.cat] = l; });
+    html += '<h3>Daily limits</h3>';
+    (d.categories || []).forEach(function(c) {
+      var l = limitByCat[c.id], cid = esc(c.id);
+      var state = !l ? '<span class="sched-note" style="margin:0">No limit</span>'
+        : l.max === 0 ? '<span class="sev sev-high">Blocked</span>'
+        : '<span class="sev ' + (l.over ? 'sev-high' : 'sev-info') + '">' + l.used + ' of ' + l.max + ' min' +
+          (l.over ? ' — limit reached' : '') + '</span>';
+      html += '<div class="kids-rule"><span class="val">' + esc(c.label) + '</span>' + state +
+        '<input id="sched-lim-' + id + '-' + cid + '" class="sched-lim" type="number" min="0" max="1440" step="5" style="width:90px;flex:none"' +
+        ' placeholder="No limit" value="' + (l ? l.max : '') + '">' +
+        '<span class="sched-note" style="margin:0">min/day</span>' +
+        '<button class="btn" onclick="schedSetLimit(\'' + id + '\',\'' + cid + '\')">Save</button></div>';
+    });
+    if (!(d.categories || []).length) {
+      html += '<div class="kids-empty">No categories yet — click "Enable schedules" to create Video, Social media and Games.</div>';
+    }
+
+    // Bedtimes
+    html += '<h3>Bedtimes</h3>';
+    if (k.blocks.length === 0) html += '<div class="kids-empty">No bedtimes yet — this kid is never cut off.</div>';
+    k.blocks.forEach(function(b) {
+      html += '<div class="kids-rule"><span class="val">' + esc(schedBlockLabel(b)) + '</span>' +
+        '<button class="btn" onclick="postAction({action:\'sched_block_del\',id:\'' + id + '\',block:\'' + esc(b) + '\'})">Remove</button></div>';
+    });
+    html += '<div class="kids-rule-form sched-form"><span class="sched-days">' +
+      SCHED_DAYS.map(function(day) {
+        return '<label><input type="checkbox" class="sched-day-' + id + '" value="' + day + '">' + SCHED_DAY_LABEL[day] + '</label>';
+      }).join('') +
+      '</span><input id="sched-start-' + id + '" type="time" value="21:00">' +
+      '<span class="sched-note" style="margin:0">to</span>' +
+      '<input id="sched-end-' + id + '" type="time" value="07:00">' +
+      '<button class="btn" onclick="schedAddBlock(\'' + id + '\')">Add bedtime</button></div>' +
+      '</div>';
+  });
+
+  if (unassigned.length) {
+    html += '<h3>Unassigned devices on the kids WiFi</h3>' + unassigned.map(function(dev) {
+      return '<div class="kids-rule"><span class="val">' + esc(dev.host) +
+        ' <span style="color:var(--text-dim)">' + esc(dev.mac) + ' · ' + esc(dev.ip) + '</span></span></div>';
+    }).join('');
+  }
+
+  body.innerHTML = html;
+}
+
+function schedAddKid() {
+  var input = document.getElementById('sched-new-kid');
+  var name = (input.value || '').trim();
+  if (!name) { showToast('Enter a name'); return; }
+  postAction({action: 'sched_kid_add', name: name});
+  input.value = '';
+}
+
+function schedRename(id) {
+  var name = prompt('New name');
+  if (name && name.trim()) postAction({action: 'sched_kid_update', id: id, name: name.trim()});
+}
+
+function schedRemoveKid(id) {
+  if (confirm('Remove this kid and their bedtimes? Their devices will no longer be scheduled.')) {
+    postAction({action: 'sched_kid_del', id: id});
+  }
+}
+
+function schedAddDevice(id) {
+  var typed = (document.getElementById('sched-mac-' + id).value || '').trim();
+  var mac = typed || document.getElementById('sched-dev-' + id).value;
+  if (!mac) { showToast('Pick a device or type a MAC'); return; }
+  postAction({action: 'sched_mac_add', id: id, mac: mac});
+}
+
+// Blank = remove the limit, 0 = block the category, otherwise minutes per day.
+function schedSetLimit(id, cat) {
+  var v = (document.getElementById('sched-lim-' + id + '-' + cat).value || '').trim();
+  if (v !== '' && !/^\d+$/.test(v)) { showToast('Minutes must be a whole number'); return; }
+  postAction({action: 'sched_limit_set', id: id, cat: cat, minutes: v});
+}
+
+function schedAddBlock(id) {
+  var days = Array.prototype.slice.call(document.querySelectorAll('.sched-day-' + id + ':checked'))
+    .map(function(c) { return c.value; });
+  var start = document.getElementById('sched-start-' + id).value;
+  var end = document.getElementById('sched-end-' + id).value;
+  if (!days.length) { showToast('Pick at least one day'); return; }
+  if (!start || !end) { showToast('Set both times'); return; }
+  postAction({action: 'sched_block_add', id: id, days: days, start: start, end: end});
+}
+
 // action: an action name, or a full payload object such as {action: 'kids_pause', minutes: 30}.
 function postAction(action) {
+  var payload = typeof action === 'string' ? {action: action} : action;
   var btns = document.querySelectorAll('.btn');
   btns.forEach(function(b) { b.disabled = true; });
   fetch(API, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(typeof action === 'string' ? {action: action} : action)
+    body: JSON.stringify(payload)
   })
     .then(function(r) {
       if (handleAuthError(r)) throw new Error('auth');
@@ -1378,6 +1604,8 @@ function postAction(action) {
       // fetchAll leaves the Kids card alone while a search is active, so
       // refresh it explicitly or a rule/pause change would not show up.
       setTimeout(function() { fetchAll(); if (kidsQuery) fetchKids(); }, 2000);
+      // Schedule edits apply immediately on the Pi; redraw the card right away.
+      if (/^sched_/.test(payload.action)) fetchSchedule(true);
     })
     .catch(function(err) {
       if (err.message !== 'auth') showToast('Error: ' + err.message);

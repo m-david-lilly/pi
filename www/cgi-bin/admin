@@ -509,6 +509,78 @@ kids_json_raw() {
 	EOF
 }
 
+# ── Kids bedtime schedules (/etc/config/kids_schedule) ─────────────
+
+SCHED_SCRIPT=/usr/bin/kids-schedule.sh
+
+get_schedule() {
+	send_json
+	schedule_json_raw
+}
+
+# Kids (name, devices, bedtime windows, blocked-now) plus the devices currently
+# on the kids network, so the dashboard can map devices to kids. Every string
+# here was validated on write (names, MACs, windows) or is filtered below
+# (lease hostnames), so it is safe to emit without JSON escaping.
+schedule_json_raw() {
+	. /lib/functions.sh
+	touch /etc/config/kids_schedule
+	sched_status=$($SCHED_SCRIPT status 2>/dev/null)
+	kids_json=""
+	_sched_kid() {
+		local id="$1" name enabled macs="" blocks="" line blocked window limits
+		config_get name "$id" name "$id"
+		config_get_bool enabled "$id" enabled 1
+		_sched_mac() { macs="$macs${macs:+,}\"$1\""; }
+		_sched_block() { blocks="$blocks${blocks:+,}\"$1\""; }
+		config_list_foreach "$id" mac _sched_mac
+		config_list_foreach "$id" block _sched_block
+		line=$(echo "$sched_status" | grep "^$id ")
+		blocked=$(echo "$line" | sed -n 's/.* blocked=\([01]\).*/\1/p')
+		window=$(echo "$line" | sed -n 's/.* window=\([^ ]*\).*/\1/p')
+		# "limit <id> <cat> used=N max=N over=0|1" -> {"cat":..,"used":N,"max":N,"over":0|1}
+		limits=$(echo "$sched_status" | awk -v k="$id" '$1 == "limit" && $2 == k {
+			sub("used=", "", $4); sub("max=", "", $5); sub("over=", "", $6)
+			printf "%s{\"cat\":\"%s\",\"used\":%d,\"max\":%d,\"over\":%d}", (n++ ? "," : ""), $3, $4, $5, $6 }')
+		kids_json="$kids_json${kids_json:+,}{\"id\":\"$id\",\"name\":\"$name\",\"enabled\":$enabled,\"blocked\":${blocked:-0},\"window\":\"$window\",\"macs\":[$macs],\"blocks\":[$blocks],\"limits\":[$limits]}"
+	}
+	config_load kids_schedule
+	config_foreach _sched_kid kid
+	# "category <id> <label...>" -> {"id":..,"label":..}; labels filtered to safe chars.
+	categories=$(echo "$sched_status" | awk '$1 == "category" {
+		id = $2; $1 = ""; $2 = ""; label = substr($0, 3); gsub(/[^A-Za-z0-9 &._-]/, "", label)
+		printf "%s{\"id\":\"%s\",\"label\":\"%s\"}", (n++ ? "," : ""), id, label }')
+	devices=$(awk '$3 ~ /^192\.168\.30\./ {
+		h = $4; gsub(/[^A-Za-z0-9._-]/, "", h); if (h == "") h = "unknown"
+		printf "%s{\"mac\":\"%s\",\"ip\":\"%s\",\"host\":\"%s\"}", (n++ ? "," : ""), tolower($2), $3, h
+	}' /tmp/dhcp.leases 2>/dev/null)
+	installed=false
+	[ -x "$SCHED_SCRIPT" ] && grep -q 'kids-schedule.sh apply' /etc/crontabs/root 2>/dev/null && installed=true
+	cat <<-EOF
+	{"installed": $installed, "now": "$(date '+%a %H:%M %Z')", "categories": [$categories], "kids": [$kids_json], "devices": [$devices]}
+	EOF
+}
+
+sched_valid_kid() {
+	echo "$1" | grep -qE '^[A-Za-z0-9_]+$' && [ "$(uci -q get "kids_schedule.$1")" = "kid" ]
+}
+
+sched_valid_name() {
+	echo "$1" | grep -qE "^[A-Za-z0-9 ._'-]{1,32}\$"
+}
+
+sched_valid_mac() {
+	echo "$1" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+}
+
+# Commit, re-evaluate now (so a change takes effect immediately, not at the
+# next cron minute) and report.
+sched_done() {
+	uci commit kids_schedule
+	[ -x "$SCHED_SCRIPT" ] && $SCHED_SCRIPT apply >/dev/null 2>&1
+	echo "{\"ok\":true,\"message\":\"$1\"}"
+}
+
 # ── POST handlers ───────────────────────────────────────────────────
 
 handle_post_with_data() {
@@ -670,6 +742,137 @@ handle_post_with_data() {
 				echo '{"ok":true,"message":"rule removed"}'
 			else
 				echo '{"ok":false,"message":"could not remove rule"}'
+			fi
+			;;
+		sched_kid_add)
+			send_json
+			name=$(echo "$POSTDATA" | jsonfilter -e '@.name' 2>/dev/null)
+			if ! sched_valid_name "$name"; then
+				echo '{"ok":false,"message":"name: 1-32 letters, digits, spaces or . _ '"'"' -"}'
+				return
+			fi
+			touch /etc/config/kids_schedule
+			id=$(uci add kids_schedule kid)
+			uci set "kids_schedule.$id.name=$name"
+			uci set "kids_schedule.$id.enabled=1"
+			sched_done "Added $name"
+			;;
+		sched_kid_update)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			name=$(echo "$POSTDATA" | jsonfilter -e '@.name' 2>/dev/null)
+			enabled=$(echo "$POSTDATA" | jsonfilter -e '@.enabled' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			if [ -n "$name" ]; then
+				sched_valid_name "$name" || { echo '{"ok":false,"message":"invalid name"}'; return; }
+				uci set "kids_schedule.$id.name=$name"
+			fi
+			case "$enabled" in
+				true|1) uci set "kids_schedule.$id.enabled=1" ;;
+				false|0) uci set "kids_schedule.$id.enabled=0" ;;
+				'') ;;
+				*) echo '{"ok":false,"message":"invalid enabled"}'; return ;;
+			esac
+			sched_done "Saved"
+			;;
+		sched_kid_del)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			uci delete "kids_schedule.$id"
+			sched_done "Kid removed"
+			;;
+		sched_mac_add)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			mac=$(echo "$POSTDATA" | jsonfilter -e '@.mac' 2>/dev/null | tr 'A-F' 'a-f' | tr '-' ':')
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			sched_valid_mac "$mac" || { echo '{"ok":false,"message":"invalid MAC address"}'; return; }
+			if uci -q show kids_schedule | grep -q "$mac"; then
+				echo '{"ok":false,"message":"that device is already assigned to a kid"}'
+				return
+			fi
+			uci add_list "kids_schedule.$id.mac=$mac"
+			sched_done "Device added"
+			;;
+		sched_mac_del)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			mac=$(echo "$POSTDATA" | jsonfilter -e '@.mac' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			sched_valid_mac "$mac" || { echo '{"ok":false,"message":"invalid MAC address"}'; return; }
+			uci del_list "kids_schedule.$id.mac=$mac"
+			sched_done "Device removed"
+			;;
+		sched_block_add)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			start=$(echo "$POSTDATA" | jsonfilter -e '@.start' 2>/dev/null)
+			end=$(echo "$POSTDATA" | jsonfilter -e '@.end' 2>/dev/null)
+			picked=$(echo "$POSTDATA" | jsonfilter -e '@.days[*]' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			days=""
+			for d in sun mon tue wed thu fri sat; do
+				echo "$picked" | grep -qx "$d" && days="$days $d"
+			done
+			[ -n "$days" ] || { echo '{"ok":false,"message":"pick at least one day"}'; return; }
+			for t in "$start" "$end"; do
+				echo "$t" | grep -qE '^([01][0-9]|2[0-3]):[0-5][0-9]$' || { echo '{"ok":false,"message":"times must be HH:MM"}'; return; }
+			done
+			[ "$start" != "$end" ] || { echo '{"ok":false,"message":"start and end must differ"}'; return; }
+			block="${days# } $start-$end"
+			# `uci show` quotes each list item, so match the whole quoted entry
+			# ('mon 21:00-07:00' must not match inside 'sun mon 21:00-07:00').
+			if uci -q show "kids_schedule.$id.block" | grep -qF "'$block'"; then
+				echo '{"ok":false,"message":"that bedtime already exists"}'
+				return
+			fi
+			uci add_list "kids_schedule.$id.block=$block"
+			sched_done "Bedtime added"
+			;;
+		sched_block_del)
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			block=$(echo "$POSTDATA" | jsonfilter -e '@.block' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			echo "$block" | grep -qE '^((sun|mon|tue|wed|thu|fri|sat) )+([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$' || {
+				echo '{"ok":false,"message":"invalid bedtime"}'; return; }
+			uci del_list "kids_schedule.$id.block=$block"
+			sched_done "Bedtime removed"
+			;;
+		sched_limit_set)
+			# minutes: "" removes the limit, 0 blocks the category, 1-1440 = daily minutes.
+			send_json
+			id=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			cat=$(echo "$POSTDATA" | jsonfilter -e '@.cat' 2>/dev/null)
+			minutes=$(echo "$POSTDATA" | jsonfilter -e '@.minutes' 2>/dev/null)
+			sched_valid_kid "$id" || { echo '{"ok":false,"message":"unknown kid"}'; return; }
+			if ! echo "$cat" | grep -qE '^[A-Za-z0-9_]+$' || [ "$(uci -q get "kids_schedule.$cat")" != "category" ]; then
+				echo '{"ok":false,"message":"unknown category"}'
+				return
+			fi
+			case "$minutes" in
+				'') ;;
+				*[!0-9]*) echo '{"ok":false,"message":"minutes must be a whole number"}'; return ;;
+				*) [ "$minutes" -le 1440 ] || { echo '{"ok":false,"message":"minutes must be 0-1440"}'; return; } ;;
+			esac
+			uci -q show "kids_schedule.$id.limit" | grep -o "'$cat [0-9]*'" | tr -d "'" | while read -r old; do
+				uci del_list "kids_schedule.$id.limit=$old"
+			done
+			if [ -n "$minutes" ]; then
+				uci add_list "kids_schedule.$id.limit=$cat $minutes"
+				sched_done "Limit saved"
+			else
+				sched_done "Limit removed"
+			fi
+			;;
+		sched_install)
+			send_json
+			if [ -x "$SCHED_SCRIPT" ]; then
+				$SCHED_SCRIPT install >/dev/null 2>&1
+				echo '{"ok":true,"message":"Schedules enabled"}'
+			else
+				echo '{"ok":false,"message":"kids-schedule.sh not found"}'
 			fi
 			;;
 		check_updates)
@@ -873,6 +1076,7 @@ case "$REQUEST_METHOD" in
 			dns)     get_dns ;;
 			vpn)     get_vpn ;;
 			kids)    get_kids "$(echo "&$QUERY_STRING" | sed -n 's/.*&q=\([A-Za-z0-9._-]*\).*/\1/p')" ;;
+			schedule) get_schedule ;;
 			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;

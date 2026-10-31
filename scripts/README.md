@@ -35,6 +35,7 @@ and logged. Design + limits: [`../docs/reference/kids-filtering.md`](../docs/ref
 | `kids-toggle.sh` | `/usr/bin/kids-toggle.sh` | `on` / `off` / `pause [mins]` / `resume` / `status` / `resume-if-due`. |
 | `kids-nft.sh` | `/usr/bin/kids-nft.sh` | `apply` / `flush` / `status` the standalone `inet kidproxy` nft table. |
 | `kids-watchdog.sh` | `/usr/bin/kids-watchdog.sh` | Cron `*/5`: restart a dead proxy, email if it stays down, expire pauses. |
+| `kids-schedule.sh` | `/usr/bin/kids-schedule.sh` | Per-kid bedtimes and daily time limits per category (video/social/games) from `/etc/config/kids_schedule`, managed from the dashboard. `apply` (cron, every minute) / `status` / `flush` / `install`. See [`../docs/reference/kids-schedules.md`](../docs/reference/kids-schedules.md). |
 | `build-kidproxy.ps1` | — | Cross-compiles `proxy/` to a static `linux/arm64` binary (`proxy/dist/kidproxy`). |
 
 The proxy itself (`proxy/`) is Go with a pure-Go SQLite driver: static, no runtime
