@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kids Analytics</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2d3a;
+  --text: #e4e4e7;
+  --text-dim: #8b8d98;
+  --accent: #3b82f6;
+  --radius: 10px;
+  /* Chart chrome + validated categorical slots (dark steps, checked against --surface). */
+  --grid: #2a2d3a;
+  --axis: #3a3d4a;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #6b6e7a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  padding: 20px 16px 40px;
+}
+.wrap { max-width: 1200px; margin: 0 auto; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+header h1 { font-size: 1.3rem; font-weight: 600; }
+header a { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+select, .seg button, .btn {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; font-family: inherit; cursor: pointer;
+}
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:hover, .seg button:hover:not(.on), select:hover { border-color: var(--text-dim); }
+.spacer { flex: 1; }
+.crumbs { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 12px; min-height: 1.4em; }
+.crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.tile .label { font-size: 0.75rem; color: var(--text-dim); }
+.tile .value { font-size: 1.6rem; font-weight: 600; margin-top: 2px; }
+.tile .sub { font-size: 0.75rem; color: var(--text-dim); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+.card h2 { font-size: 0.9rem; font-weight: 600; margin-bottom: 2px; }
+.card .hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 10px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 8px; font-size: 0.8rem; color: var(--text); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend span.click { cursor: pointer; }
+.legend span.click:hover { text-decoration: underline; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .axis-text { fill: var(--text-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart .gridline { stroke: var(--grid); stroke-width: 1; }
+.chart .baseline { stroke: var(--axis); stroke-width: 1; }
+.chart .seg { cursor: pointer; }
+.chart .colhit { fill: transparent; cursor: pointer; }
+.chart .colhit:hover, .chart .colhit.sel { fill: rgba(255,255,255,0.04); }
+.tip {
+  position: absolute; pointer-events: none; background: #0b0c10; border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 0.78rem; min-width: 150px; z-index: 5;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4); display: none; white-space: nowrap;
+}
+.tip .t { font-weight: 600; margin-bottom: 4px; }
+.tip .r { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.tip .r span:first-child { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.tip .r b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+th { color: var(--text-dim); font-weight: 500; font-size: 0.75rem; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: rgba(255,255,255,0.03); }
+td .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 8px; vertical-align: -1px; }
+.note { font-size: 0.75rem; color: var(--text-dim); margin-top: 6px; }
+.empty { color: var(--text-dim); font-size: 0.85rem; padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Kids Analytics</h1>
+    <a href="/admin.html">← Back to admin</a>
+  </header>
+
+  <div class="filters">
+    <select id="f-kid" onchange="state.kid = this.value; state.day = null; render()"></select>
+    <span class="seg" id="f-range">
+      <button data-d="7">7 days</button><button data-d="14">14 days</button><button data-d="30">30 days</button><button data-d="90">90 days</button>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn" id="dl-csv" href="#" download>Download CSV</a>
+  </div>
+
+  <div class="crumbs" id="crumbs"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2 id="daily-title">Time per day</h2>
+    <div class="hint" id="daily-hint"></div>
+    <div class="legend" id="legend"></div>
+    <div class="chart" id="chart-daily"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 id="hour-title">Time of day</h2>
+      <div class="hint" id="hour-hint"></div>
+      <div class="chart" id="chart-hour"></div>
+    </div>
+    <div class="card">
+      <h2>Day of week</h2>
+      <div class="hint">Average minutes per day, by weekday, over the selected range.</div>
+      <div class="chart" id="chart-weekday"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 id="table-title">Breakdown</h2>
+    <div id="table"></div>
+    <div class="note">
+      Time is measured by the router from traffic to each service's servers, in whole minutes (a minute
+      counts when there was real traffic). A kid's time is summed across their devices, so two devices in
+      the same minute count twice. Category totals count a minute once even if several of its services
+      were active, so services can add up to slightly more than their category.
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/cgi-bin/admin';
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const SLOTS = 8;
+let DATA = null;
+const state = {range: 14, kid: 'all', cat: null, day: null};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+  });
+}
+
+function fmtMin(m) {
+  m = Math.round(m);
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60), r = m % 60;
+  return h + 'h' + (r ? ' ' + r + 'm' : '');
+}
+
+function dayLabel(ymd, withWeekday) {
+  var d = new Date(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8));
+  return (withWeekday ? WEEKDAYS[d.getDay()] + ' ' : '') + (d.getMonth() + 1) + '/' + d.getDate();
+}
+
+function weekdayOf(ymd) {
+  return new Date(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)).getDay();
+}
+
+function hourLabel(h) {
+  return h === 0 ? '12a' : h < 12 ? h + 'a' : h === 12 ? '12p' : (h - 12) + 'p';
+}
+
+// ── Data ─────────────────────────────────────────────────────
+
+function load() {
+  document.getElementById('dl-csv').href = API + '?section=statscsv&days=' + state.range;
+  fetch(API + '?section=stats&days=' + state.range)
+    .then(function(r) {
+      if (r.status === 401) { location.href = '/admin.html'; throw new Error('auth'); }
+      return r.json();
+    })
+    .then(function(d) { DATA = d; buildKidFilter(); render(); })
+    .catch(function(err) {
+      if (err.message !== 'auth') document.getElementById('tiles').innerHTML = '<div class="empty">Could not load data: ' + esc(err.message) + '</div>';
+    });
+}
+
+function buildKidFilter() {
+  var sel = document.getElementById('f-kid');
+  var opts = '<option value="all">All kids</option>' +
+    DATA.kids.map(function(k) { return '<option value="' + esc(k.id) + '">' + esc(k.name) + '</option>'; }).join('') +
+    '<option value="_other">Unassigned devices</option>';
+  sel.innerHTML = opts;
+  if (!Array.prototype.some.call(sel.options, function(o) { return o.value === state.kid; })) state.kid = 'all';
+  sel.value = state.kid;
+}
+
+// Series for the current level, in fixed config order: categories at the top,
+// a category's services when drilled in. Colors follow the entity (its position
+// in config order), never its rank; past 7 services the rest fold into Other.
+function seriesDefs() {
+  if (!state.cat) {
+    return DATA.categories.map(function(c, i) {
+      return {id: c.id, label: c.label, color: 'var(--series-' + (i % SLOTS + 1) + ')'};
+    });
+  }
+  var svcs = DATA.services.filter(function(s) { return s.category === state.cat; });
+  var defs = svcs.slice(0, SLOTS - 1).map(function(s, i) {
+    return {id: s.id, label: s.label, color: 'var(--series-' + (i + 1) + ')'};
+  });
+  if (svcs.length > SLOTS - 1) {
+    defs.push({id: '_other', label: 'Other', color: 'var(--series-other)',
+      members: svcs.slice(SLOTS - 1).map(function(s) { return s.id; })});
+  }
+  return defs;
+}
+
+function kidMacs() {
+  if (state.kid === 'all') return null;
+  if (state.kid === '_other') {
+    var known = {};
+    DATA.kids.forEach(function(k) { k.macs.forEach(function(m) { known[m] = 1; }); });
+    return {exclude: known};
+  }
+  var k = DATA.kids.filter(function(k) { return k.id === state.kid; })[0];
+  var inc = {};
+  (k ? k.macs : []).forEach(function(m) { inc[m] = 1; });
+  return {include: inc};
+}
+
+// Aggregate rows into per-series arrays: byDay[series][dayIdx], byHour[series][h].
+function aggregate(defs) {
+  var macs = kidMacs();
+  var kind = state.cat ? 's' : 'c';
+  var idToSeries = {};
+  defs.forEach(function(d, i) {
+    if (d.members) d.members.forEach(function(m) { idToSeries[m] = i; });
+    else idToSeries[d.id] = i;
+  });
+  var nd = DATA.days.length;
+  var byDay = defs.map(function() { return new Array(nd).fill(0); });
+  var byHour = defs.map(function() { return new Array(24).fill(0); });
+  var byHourAll = defs.map(function() { return new Array(24).fill(0); });
+  DATA.rows.forEach(function(r) {
+    var di = r[0], h = r[1], mac = r[2], k = r[3], id = r[4], m = r[5];
+    if (k !== kind) return;
+    var si = idToSeries[id];
+    if (si === undefined) return;
+    if (macs && macs.include && !macs.include[mac]) return;
+    if (macs && macs.exclude && macs.exclude[mac]) return;
+    byDay[si][di] += m;
+    byHourAll[si][h] += m;
+    if (state.day === null || state.day === di) byHour[si][h] += m;
+  });
+  return {byDay: byDay, byHour: byHour, byHourAll: byHourAll};
+}
+
+// ── Render ───────────────────────────────────────────────────
+
+function render() {
+  if (!DATA) return;
+  document.querySelectorAll('#f-range button').forEach(function(b) {
+    b.classList.toggle('on', +b.dataset.d === state.range);
+  });
+  var defs = seriesDefs();
+  var agg = aggregate(defs);
+  var nd = DATA.days.length;
+  var catLabel = state.cat ? (DATA.categories.filter(function(c) { return c.id === state.cat; })[0] || {}).label : null;
+
+  // Breadcrumb
+  document.getElementById('crumbs').innerHTML = state.cat
+    ? '<a onclick="drill(null)">All categories</a> › ' + esc(catLabel)
+    : 'All categories — click a category to see its services';
+
+  // Totals per series and overall
+  var totals = defs.map(function(d, i) { return agg.byDay[i].reduce(function(a, b) { return a + b; }, 0); });
+  var total = totals.reduce(function(a, b) { return a + b; }, 0);
+  var activeDays = 0;
+  for (var di = 0; di < nd; di++) {
+    var t = 0; defs.forEach(function(d, i) { t += agg.byDay[i][di]; });
+    if (t > 0) activeDays++;
+  }
+  var top = -1;
+  totals.forEach(function(t, i) { if (t > 0 && (top < 0 || t > totals[top])) top = i; });
+  var peakHour = -1, peakVal = 0;
+  for (var h = 0; h < 24; h++) {
+    var hv = 0; defs.forEach(function(d, i) { hv += agg.byHourAll[i][h]; });
+    if (hv > peakVal) { peakVal = hv; peakHour = h; }
+  }
+  document.getElementById('tiles').innerHTML =
+    tile('Total time', fmtMin(total), 'last ' + nd + ' days' + (catLabel ? ' · ' + esc(catLabel) : '')) +
+    tile('Daily average', fmtMin(total / nd), activeDays + ' of ' + nd + ' days with use') +
+    tile(state.cat ? 'Top service' : 'Top category', top >= 0 ? esc(defs[top].label) : '—',
+      top >= 0 ? fmtMin(totals[top]) + ' (' + Math.round(100 * totals[top] / total) + '%)' : 'no use yet') +
+    tile('Busiest hour', peakHour >= 0 ? hourLabel(peakHour) + '–' + hourLabel((peakHour + 1) % 24) : '—',
+      peakHour >= 0 ? fmtMin(peakVal) + ' in that hour, all days' : 'no use yet');
+
+  // Legend (clickable at the top level: drill into the category)
+  document.getElementById('legend').innerHTML = defs.map(function(d) {
+    var click = !state.cat ? ' class="click" onclick="drill(\'' + esc(d.id) + '\')" title="Show ' + esc(d.label) + ' services"' : '';
+    return '<span' + click + '><i style="background:' + d.color + '"></i>' + esc(d.label) + '</span>';
+  }).join('');
+
+  document.getElementById('daily-title').textContent = 'Time per day' + (catLabel ? ' — ' + catLabel : '');
+  document.getElementById('daily-hint').textContent = state.cat
+    ? 'Minutes per day by service. Click a day to see its hours below.'
+    : 'Minutes per day by category. Click a colored segment (or the legend) to see its services; click a day to see its hours below.';
+
+  var dayLabels = DATA.days.map(function(d) { return dayLabel(d, false); });
+  var dayTitles = DATA.days.map(function(d) { return dayLabel(d, true); });
+  stackChart(document.getElementById('chart-daily'), {
+    labels: dayLabels, titles: dayTitles, defs: defs, values: agg.byDay, height: 240,
+    selected: state.day,
+    onSeg: state.cat ? null : function(si) { drill(defs[si].id); },
+    onCol: function(i) { state.day = state.day === i ? null : i; render(); }
+  });
+
+  var hourTitle = state.day === null ? 'Time of day' : 'Time of day — ' + dayTitles[state.day];
+  document.getElementById('hour-title').textContent = hourTitle;
+  document.getElementById('hour-hint').innerHTML = state.day === null
+    ? 'Total minutes in each hour over the selected range.'
+    : 'Minutes in each hour on that day. <a href="#" onclick="state.day=null;render();return false" style="color:var(--accent)">Show all days</a>';
+  var hourLabels = [], hourTitles = [];
+  for (var hh = 0; hh < 24; hh++) {
+    hourLabels.push(hh % 3 === 0 ? hourLabel(hh) : '');
+    hourTitles.push(hourLabel(hh) + '–' + hourLabel((hh + 1) % 24));
+  }
+  stackChart(document.getElementById('chart-hour'), {
+    labels: hourLabels, titles: hourTitles, defs: defs, values: agg.byHour, height: 200, everyLabel: true,
+    onSeg: state.cat ? null : function(si) { drill(defs[si].id); }
+  });
+
+  // Day of week: average per occurrence of each weekday in range
+  var wdCount = new Array(7).fill(0);
+  DATA.days.forEach(function(d) { wdCount[weekdayOf(d)]++; });
+  var byWd = defs.map(function(d, i) {
+    var arr = new Array(7).fill(0);
+    DATA.days.forEach(function(day, di) { arr[weekdayOf(day)] += agg.byDay[i][di]; });
+    return arr.map(function(v, w) { return wdCount[w] ? v / wdCount[w] : 0; });
+  });
+  stackChart(document.getElementById('chart-weekday'), {
+    labels: WEEKDAYS, titles: WEEKDAYS.map(function(w, i) { return w + ' (avg of ' + wdCount[i] + ')'; }),
+    defs: defs, values: byWd, height: 200, everyLabel: true,
+    onSeg: state.cat ? null : function(si) { drill(defs[si].id); }
+  });
+
+  // Table view (also the accessible view of every chart)
+  var order = defs.map(function(d, i) { return i; }).sort(function(a, b) { return totals[b] - totals[a]; });
+  document.getElementById('table-title').textContent = state.cat ? catLabel + ' — services' : 'Categories';
+  document.getElementById('table').innerHTML = total === 0
+    ? '<div class="empty">No recorded use for this selection yet. Usage appears here as kids devices use these services on the kids WiFi.</div>'
+    : '<table><thead><tr><th>' + (state.cat ? 'Service' : 'Category') + '</th><th class="num">Total</th><th class="num">Avg / day</th><th class="num">Share</th><th class="num">Peak day</th></tr></thead><tbody>' +
+      order.filter(function(i) { return totals[i] > 0; }).map(function(i) {
+        var d = defs[i], peak = 0, pdi = -1;
+        agg.byDay[i].forEach(function(v, di) { if (v > peak) { peak = v; pdi = di; } });
+        var click = !state.cat ? ' class="click" onclick="drill(\'' + esc(d.id) + '\')"' : '';
+        return '<tr' + click + '><td><span class="sw" style="background:' + d.color + '"></span>' + esc(d.label) + '</td>' +
+          '<td class="num">' + fmtMin(totals[i]) + '</td><td class="num">' + fmtMin(totals[i] / nd) + '</td>' +
+          '<td class="num">' + Math.round(100 * totals[i] / total) + '%</td>' +
+          '<td class="num">' + (pdi >= 0 ? dayTitles[pdi] + ' · ' + fmtMin(peak) : '—') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+}
+
+function tile(label, value, sub) {
+  return '<div class="tile"><div class="label">' + label + '</div><div class="value">' + value + '</div><div class="sub">' + sub + '</div></div>';
+}
+
+function drill(cat) {
+  state.cat = cat;
+  render();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+// ── Stacked column chart (SVG) ───────────────────────────────
+// Marks: columns <= 24px, 2px surface gap between stacked segments, 4px rounded
+// top on the topmost segment only, hairline gridlines, one y-axis in minutes.
+
+function niceStep(max) {
+  var steps = [5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440, 2880];
+  for (var i = 0; i < steps.length; i++) if (max / steps[i] <= 5) return steps[i];
+  return 2880;
+}
+
+function stackChart(el, o) {
+  var W = el.clientWidth || 600, H = o.height, ml = 44, mr = 6, mt = 8, mb = 22;
+  var pw = W - ml - mr, ph = H - mt - mb, n = o.labels.length;
+  var colTotals = o.labels.map(function(_, i) {
+    var t = 0; o.values.forEach(function(v) { t += v[i]; }); return t;
+  });
+  var max = Math.max.apply(null, colTotals.concat([0]));
+  var step = niceStep(Math.max(max, 1)), yMax = Math.max(step, Math.ceil(max / step) * step);
+  var band = pw / n, bw = Math.max(2, Math.min(24, band * 0.68));
+  var y = function(v) { return mt + ph - (v / yMax) * ph; };
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" height="' + H + '" role="img" aria-label="Stacked column chart">';
+  for (var t = 0; t <= yMax; t += step) {
+    svg += '<line class="' + (t === 0 ? 'baseline' : 'gridline') + '" x1="' + ml + '" x2="' + (W - mr) + '" y1="' + y(t) + '" y2="' + y(t) + '"/>';
+    svg += '<text class="axis-text" x="' + (ml - 6) + '" y="' + (y(t) + 3) + '" text-anchor="end">' + fmtMin(t) + '</text>';
+  }
+  var labelEvery = o.everyLabel ? 1 : Math.max(1, Math.ceil(n / Math.max(1, Math.floor(pw / 44))));
+  for (var i = 0; i < n; i++) {
+    var cx = ml + band * i + band / 2, x0 = cx - bw / 2;
+    svg += '<rect class="colhit' + (o.selected === i ? ' sel' : '') + '" data-col="' + i + '" x="' + (ml + band * i) + '" y="' + mt + '" width="' + band + '" height="' + ph + '"/>';
+    var acc = 0, topSi = -1;
+    o.values.forEach(function(v, si) { if (v[i] > 0) topSi = si; });
+    o.values.forEach(function(v, si) {
+      var val = v[i];
+      if (val <= 0) return;
+      var yb = y(acc), yt = y(acc + val);
+      acc += val;
+      var hgt = yb - yt - (si === topSi ? 0 : 2);          // 2px surface gap above each lower segment
+      if (hgt < 1) hgt = 1;
+      var top = yb - hgt, fill = o.defs[si].color;
+      if (si === topSi) {
+        var r = Math.min(4, hgt, bw / 2);
+        svg += '<path class="seg" data-col="' + i + '" data-si="' + si + '" fill="' + fill + '" d="M' + x0 + ',' + yb +
+          ' V' + (top + r) + ' Q' + x0 + ',' + top + ' ' + (x0 + r) + ',' + top + ' H' + (x0 + bw - r) +
+          ' Q' + (x0 + bw) + ',' + top + ' ' + (x0 + bw) + ',' + (top + r) + ' V' + yb + ' Z"/>';
+      } else {
+        svg += '<rect class="seg" data-col="' + i + '" data-si="' + si + '" fill="' + fill + '" x="' + x0 + '" y="' + top + '" width="' + bw + '" height="' + hgt + '"/>';
+      }
+    });
+    if (o.labels[i] && i % labelEvery === 0) {
+      svg += '<text class="axis-text" x="' + cx + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(o.labels[i]) + '</text>';
+    }
+  }
+  svg += '</svg><div class="tip"></div>';
+  el.innerHTML = svg;
+
+  var tip = el.querySelector('.tip');
+  function show(ev, i) {
+    var rows = o.defs.map(function(d, si) { return {d: d, v: o.values[si][i]}; }).filter(function(r) { return r.v > 0; });
+    tip.innerHTML = '<div class="t">' + esc(o.titles[i]) + '</div>' +
+      (rows.length ? rows.map(function(r) {
+        return '<div class="r"><span><i style="background:' + r.d.color + '"></i>' + esc(r.d.label) + '</span><b>' + fmtMin(r.v) + '</b></div>';
+      }).join('') + (rows.length > 1 ? '<div class="r" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><span>Total</span><b>' + fmtMin(colTotals[i]) + '</b></div>' : '')
+      : '<div class="r"><span>No use</span></div>');
+    tip.style.display = 'block';
+    var rect = el.getBoundingClientRect();
+    var x = ev.clientX - rect.left + 12, yy = ev.clientY - rect.top + 12;
+    if (x + tip.offsetWidth > rect.width) x = ev.clientX - rect.left - tip.offsetWidth - 12;
+    tip.style.left = Math.max(0, x) + 'px';
+    tip.style.top = yy + 'px';
+  }
+  el.querySelectorAll('[data-col]').forEach(function(node) {
+    node.addEventListener('mousemove', function(ev) { show(ev, +node.dataset.col); });
+    node.addEventListener('mouseleave', function() { tip.style.display = 'none'; });
+    node.addEventListener('click', function(ev) {
+      if (node.dataset.si !== undefined && o.onSeg) { o.onSeg(+node.dataset.si); return; }
+      if (o.onCol) o.onCol(+node.dataset.col);
+    });
+  });
+}
+
+// ── Wire up ──────────────────────────────────────────────────
+
+document.querySelectorAll('#f-range button').forEach(function(b) {
+  b.addEventListener('click', function() { state.range = +b.dataset.d; state.day = null; load(); });
+});
+var resizeTimer;
+window.addEventListener('resize', function() { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+load();
+</script>
+</body>
+</html>

@@ -28,8 +28,10 @@ matched by the addresses their domains resolve to.
 | Dashboard card | *Bedtimes & Time Limits* | `www/admin.html` |
 | Cron | `* * * * * /usr/bin/kids-schedule.sh apply` | added by `kids-schedule.sh install` |
 | nft tables | `inet kids_schedule` (bedtimes), `inet kids_limits` (limits) | generated |
-| dnsmasq hooks | `config ipset 'kidslim_<category>'` in `/etc/config/dhcp` | generated |
+| dnsmasq hooks | `config ipset 'kidslim_<service>'` in `/etc/config/dhcp` | generated |
 | Usage counters | `/tmp/kids-limits/` (RAM) | — |
+| Usage history | `/tmp/kids-stats/` (today), `/etc/kids-stats/` (90 days) | — |
+| Analytics page | `/analytics.html` | `www/analytics.html` |
 
 ### Bedtimes
 
@@ -48,35 +50,67 @@ MACs on `br-kids`:
 A window's days are the days it **starts**; if the end is earlier than the start it
 runs past midnight (`sun 21:00-07:00` = Sunday 9 PM to Monday 7 AM).
 
-### Daily limits
+### Services, categories and daily limits
 
-1. **Categories** are domain lists in `/etc/config/kids_schedule` (`config category`).
-   For each, `kids-schedule.sh` creates `cat_<category>` (IPv4, 1-day element
-   timeout) in `table inet kids_limits` and a dnsmasq `config ipset` section, so
-   every DNS answer for those domains adds its addresses to the set. Kids' DNS is
-   forced to the Pi (firewall rule `Kids-Force-DNS`), so their lookups are seen.
+1. **Services** (`config service`: label, category, domain list) are the unit of
+   measurement; **categories** (`config category`: label, `min_bytes`) group them
+   and carry the limits. For each service `kids-schedule.sh` creates `svc_<service>`
+   (IPv4, 1-day element timeout) in `table inet kids_limits` and a dnsmasq
+   `config ipset 'kidslim_<service>'` section, so every DNS answer for its domains
+   adds the addresses to the set. Kids' DNS is forced to the Pi (firewall rule
+   `Kids-Force-DNS`), so their lookups are seen.
 2. **Metering.** A rule at prerouting **-149** updates a dynamic set
-   `use_<category>` with a **byte counter per MAC** for traffic to those addresses.
-   Each minute the script takes each kid's byte delta (all their devices) per
-   category; if it is at least the category's `min_bytes` (video 50 KB, others
-   20 KB), the minute counts as used.
-3. **Enforcement.** When used ≥ limit (or the limit is 0), the kid's MACs go into
-   `blk_<category>`, and a rule before the meter drops their traffic to that
-   category — including connections already open.
-4. Usage is kept per day in `/tmp/kids-limits/usage-YYYYMMDD` and resets at
-   midnight. Bedtime-blocked traffic is dropped before metering, so it never counts.
+   `use_<service>` with a **byte counter per MAC**. Each minute, per MAC, a service
+   is *active* if its byte delta reaches its category's `min_bytes` (video 50 KB,
+   others 20 KB), and a category is active if the sum over its services does.
+3. **Limits.** A kid's category minute counts toward their limit when the category
+   bytes summed over all their devices reach `min_bytes`. When used ≥ limit (or the
+   limit is 0), the kid's MACs go into `blk_<category>`, and a rule per service
+   drops their traffic to every service in that category — including connections
+   already open. Limit usage is kept in `/tmp/kids-limits/usage-YYYYMMDD` and resets
+   at midnight (and on reboot). Bedtime-blocked traffic is dropped before metering,
+   so it never counts.
 
 Logged transitions: `logread -e kids-schedule` (bedtime start/end, "limit reached").
 
-### Default categories
+### Usage history, analytics page and CSV export
 
-Seeded by `install` only when the config has none; edit freely.
+Every active minute is also recorded per **device, hour, service and category** in
+`/tmp/kids-stats/YYYYMMDD.tsv` (RAM). Each line is `HH mac s|c id minutes`
+(`s` = service, `c` = category). It is copied to **`/etc/kids-stats/`** (flash) at
+:29 and :59 each hour, finalized there at midnight, restored into RAM after a
+reboot, and kept **90 days** (`HISTORY_DAYS`). Only aggregate minutes are stored —
+no URLs, no content.
 
-| Category | Domains (suffix match) |
+- **`/analytics.html`** (linked from the admin header; same login): time per day
+  stacked by category, click a category (segment, legend or table row) to see its
+  services; click a day to see that day's hours; time-of-day and day-of-week
+  charts; filter by kid (or *Unassigned devices*) and 7/14/30/90 days; a
+  breakdown table that is also the accessible view of the charts.
+- **Download CSV** on that page (`GET /cgi-bin/admin?section=statscsv&days=N`):
+  `date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes`,
+  one row per device/hour/service and per device/hour/category (`type` says which).
+  Kid names come from the current device assignments; unassigned devices say
+  `unassigned`. JSON for the page: `section=stats&days=N`.
+
+A kid's time is the sum over their devices (two devices in the same minute count
+twice). A category counts a minute once even when several of its services were
+active, so its services can add up to slightly more than the category.
+
+### Default services
+
+Seeded by `install` only when the config has no services (an older config's
+category-level domain lists are dropped then); edit freely — the next `apply`
+rebuilds the sets and restarts dnsmasq once.
+
+| Category | Services (domains, suffix match) |
 |---|---|
-| `video` | `googlevideo.com`, Netflix (`netflix.com`, `nflxvideo.net`), Twitch (`twitch.tv`, `ttvnw.net`, `jtvnw.net`), Disney+ (`disneyplus.com`, `dssott.com`, `bamgrid.com`), Hulu, Vimeo, Prime Video (`primevideo.com`, `aiv-cdn.net`) |
-| `social` | Instagram, Facebook (`facebook.com`, `fbcdn.net`), TikTok (`tiktok*`, `byteoversea.com`, `ibytedtos.com`), Snapchat, X/Twitter, Reddit, Discord, Pinterest, Threads, Bluesky |
-| `games` | Roblox (`roblox.com`, `rbxcdn.com`, `rbx.com`), Epic/Fortnite, Minecraft |
+| `video` | YouTube (`googlevideo.com`), Netflix (`netflix.com`, `nflxvideo.net`, `nflxso.net`, `nflximg.net`), Twitch (`twitch.tv`, `ttvnw.net`, `jtvnw.net`), Disney+ (`disneyplus.com`, `dssott.com`, `bamgrid.com`), Hulu, Prime Video (`primevideo.com`, `aiv-cdn.net`, `aiv-delivery.net`), Vimeo |
+| `social` | TikTok (`tiktok*`, `byteoversea.com`, `ibytedtos.com`), Instagram, Snapchat, Facebook (`facebook.com`, `fbcdn.net`), Discord, Reddit, X/Twitter, Pinterest, Threads, Bluesky |
+| `games` | Roblox (`roblox.com`, `rbxcdn.com`, `rbx.com`), Fortnite/Epic, Minecraft |
+
+The analytics page colors up to 7 services per category in config order and folds
+the rest into *Other*, so keep the most-used services first.
 
 > **YouTube is metered and blocked on `googlevideo.com` (its video servers), not
 > `youtube.com`.** `youtube.com` and `ytimg.com` resolve to Google front-end
@@ -126,7 +160,7 @@ scp -O www/admin.html root@192.168.1.1:/www/admin.html
 ssh root@192.168.1.1 'chmod 755 /usr/bin/kids-schedule.sh /www/cgi-bin/admin && kids-schedule.sh install'
 ```
 
-`install` seeds the default categories (if none), adds the cron line, restarts
+`install` seeds the default categories and services (if none), adds the cron line, restarts
 cron and runs a first `apply` (which creates the tables and the dnsmasq hooks,
 restarting dnsmasq once). The dashboard's **Enable schedules** button runs the same
 command. After installing, copy `/etc/config/dhcp` and `/etc/config/kids_schedule`

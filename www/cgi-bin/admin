@@ -585,6 +585,111 @@ schedule_json_raw() {
 	EOF
 }
 
+# ── Usage history (analytics page) ─────────────────────────────────
+# Written by kids-schedule.sh: /tmp/kids-stats/YYYYMMDD.tsv (today, RAM) and
+# /etc/kids-stats/YYYYMMDD.tsv (flash, kept 90 days). Each line:
+#   HH mac s|c id minutes     (s = service, c = category; minutes in that hour)
+
+# ?days=N (1-90, default 14)
+stats_days() {
+	d=$(echo "&$QUERY_STRING" | sed -n 's/.*&days=\([0-9]*\).*/\1/p')
+	[ -n "$d" ] || d=14
+	[ "$d" -ge 1 ] 2>/dev/null || d=1
+	[ "$d" -le 90 ] || d=90
+	echo "$d"
+}
+
+# "idx YYYYMMDD Day path" for each day in range, oldest first.
+stats_files() {
+	_now=$(date +%s); _i=$(( $1 - 1 )); _idx=0
+	while [ "$_i" -ge 0 ]; do
+		_e=$(( _now - _i * 86400 ))
+		_d=$(date -d "@$_e" +%Y%m%d)
+		_f=/tmp/kids-stats/$_d.tsv
+		[ -f "$_f" ] || _f=/etc/kids-stats/$_d.tsv
+		echo "$_idx $_d $(date -d "@$_e" +%a) $_f"
+		_i=$(( _i - 1 )); _idx=$(( _idx + 1 ))
+	done
+}
+
+get_stats() {
+	send_json
+	days=$(stats_days)
+	files=$(stats_files "$days")
+	sched_status=$($SCHED_SCRIPT status 2>/dev/null)
+	. /lib/functions.sh
+	config_load kids_schedule
+	kids_json=""
+	_stats_kid() {
+		local id="$1" name macs=""
+		config_get name "$id" name "$id"
+		_stats_mac() { macs="$macs${macs:+,}\"$1\""; }
+		config_list_foreach "$id" mac _stats_mac
+		kids_json="$kids_json${kids_json:+,}{\"id\":\"$id\",\"name\":\"$name\",\"macs\":[$macs]}"
+	}
+	config_foreach _stats_kid kid
+	cats=$(echo "$sched_status" | awk '$1 == "category" {
+		id = $2; $1 = ""; $2 = ""; l = substr($0, 3); gsub(/[^A-Za-z0-9 &()\/+._-]/, "", l)
+		printf "%s{\"id\":\"%s\",\"label\":\"%s\"}", (n++ ? "," : ""), id, l }')
+	svcs=$(echo "$sched_status" | awk '$1 == "service" {
+		id = $2; c = $3; $1 = ""; $2 = ""; $3 = ""; l = substr($0, 4); gsub(/[^A-Za-z0-9 &()\/+._-]/, "", l)
+		printf "%s{\"id\":\"%s\",\"category\":\"%s\",\"label\":\"%s\"}", (n++ ? "," : ""), id, c, l }')
+	devices=$(awk '{ h = $4; gsub(/[^A-Za-z0-9._-]/, "", h); if (h == "") next
+		printf "%s{\"mac\":\"%s\",\"host\":\"%s\"}", (n++ ? "," : ""), tolower($2), h }' /tmp/dhcp.leases 2>/dev/null)
+	dates=$(echo "$files" | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $2 }')
+	rows=$(echo "$files" | while read -r idx d wd f; do
+		[ -f "$f" ] && awk -v di="$idx" '$3 ~ /^[sc]$/ && $4 ~ /^[A-Za-z0-9_]+$/ {
+			printf "[%d,%d,\"%s\",\"%s\",\"%s\",%d]\n", di, $1, $2, $3, $4, $5 }' "$f"
+	done | awk '{ printf "%s%s", (NR > 1 ? "," : ""), $0 }')
+	echo "{\"days\":[$dates],\"now\":\"$(date '+%Y%m%d %H')\",\"kids\":[$kids_json],\"categories\":[$cats],\"services\":[$svcs],\"devices\":[$devices],\"rows\":[$rows]}"
+}
+
+# Raw history as CSV for offline analysis (one row per device/hour/service or category).
+get_stats_csv() {
+	days=$(stats_days)
+	files=$(stats_files "$days")
+	printf 'Content-Type: text/csv; charset=utf-8\r\nContent-Disposition: attachment; filename="kids-usage-%s-%sd.csv"\r\n%b\r\n\r\n' \
+		"$(date +%Y%m%d)" "$days" "$SEC_HDRS"
+	# Lookup file: K mac kidname | D mac host | S svc cat label | C cat label
+	map=/tmp/kids-stats-csv.$$
+	{
+		. /lib/functions.sh
+		config_load kids_schedule
+		_csv_kid() {
+			local name
+			config_get name "$1" name "$1"
+			_csv_mac() { echo "K $1 $name"; }
+			config_list_foreach "$1" mac _csv_mac
+		}
+		config_foreach _csv_kid kid
+		awk '{ print "D", tolower($2), $4 }' /tmp/dhcp.leases 2>/dev/null
+		$SCHED_SCRIPT status 2>/dev/null | awk '$1 == "service" { $1 = "S"; print } $1 == "category" { $1 = "C"; print }'
+	} > "$map"
+	echo "date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes"
+	echo "$files" | while read -r idx d wd f; do
+		[ -f "$f" ] || continue
+		awk -v day="${d%????}-$(echo "$d" | cut -c5-6)-${d#??????}" -v wd="$wd" -v map="$map" '
+			function q(s) { gsub(/"/, "\"\"", s); return "\"" s "\"" }
+			function rest(from,   i, s) { s = $from; for (i = from + 1; i <= NF; i++) s = s " " $i; return s }
+			BEGIN {
+				while ((getline < map) > 0) {
+					if ($1 == "K") kid[$2] = rest(3)
+					else if ($1 == "D") host[$2] = $3
+					else if ($1 == "S") { scat[$2] = $3; slabel[$2] = rest(4) }
+					else if ($1 == "C") clabel[$2] = rest(3)
+				}
+			}
+			$3 ~ /^[sc]$/ {
+				k = ($2 in kid) ? kid[$2] : "unassigned"
+				h = ($2 in host) ? host[$2] : ""
+				if ($3 == "s") { t = "service"; c = clabel[scat[$4]]; s = ($4 in slabel) ? slabel[$4] : $4 }
+				else { t = "category"; c = ($4 in clabel) ? clabel[$4] : $4; s = "" }
+				printf "%s,%s,%d,%s,%s,%s,%s,%s,%s,%d\n", day, wd, $1, q(k), $2, q(h), t, q(c), q(s), $5
+			}' "$f"
+	done
+	rm -f "$map"
+}
+
 sched_valid_kid() {
 	echo "$1" | grep -qE '^[A-Za-z0-9_]+$' && [ "$(uci -q get "kids_schedule.$1")" = "kid" ]
 }
@@ -1127,6 +1232,8 @@ case "$REQUEST_METHOD" in
 			kids)    get_kids "$(echo "&$QUERY_STRING" | sed -n 's/.*&q=\([A-Za-z0-9._-]*\).*/\1/p')" ;;
 			schedule) get_schedule ;;
 			kidswifi) get_kidswifi ;;
+			stats)    get_stats ;;
+			statscsv) get_stats_csv ;;
 			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;

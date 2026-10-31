@@ -1,9 +1,10 @@
-# /etc/config/kids_schedule — per-kid bedtimes and daily time limits for the
-# kids network. Managed from the admin dashboard ("Bedtimes & Time Limits");
-# enforced by /usr/bin/kids-schedule.sh (cron, every minute). See
-# docs/reference/kids-schedules.md.
+# /etc/config/kids_schedule — per-kid bedtimes, daily time limits and usage
+# history for the kids network. Managed from the admin dashboard ("Bedtimes &
+# Time Limits"); enforced by /usr/bin/kids-schedule.sh (cron, every minute).
+# See docs/reference/kids-schedules.md.
 #
-# Kids are created by the dashboard as anonymous sections, e.g.:
+# Kid sections (names, device MACs, bedtimes, limits) live only on the Pi and
+# are deliberately NOT kept in this repo. The dashboard creates them, e.g.:
 #
 #   config kid
 #   	option name 'Alex'
@@ -13,69 +14,152 @@
 #   	list limit 'video 60'
 #   	list limit 'social 0'
 #
-# Categories below were seeded by `kids-schedule.sh install` (pulled from the Pi);
-# edit their `domain` lists to tune what counts.
+# Categories and services below were seeded by `kids-schedule.sh install`
+# (pulled from the Pi); edit the services' `domain` lists to tune what counts.
 
 config category 'video'
 	option label 'Video'
 	option min_bytes '50000'
-	list domain 'googlevideo.com'
-	list domain 'nflxvideo.net'
-	list domain 'netflix.com'
-	list domain 'twitch.tv'
-	list domain 'ttvnw.net'
-	list domain 'jtvnw.net'
-	list domain 'disneyplus.com'
-	list domain 'dssott.com'
-	list domain 'bamgrid.com'
-	list domain 'hulu.com'
-	list domain 'hulustream.com'
-	list domain 'vimeo.com'
-	list domain 'vimeocdn.com'
-	list domain 'aiv-cdn.net'
-	list domain 'primevideo.com'
 
 config category 'social'
 	option label 'Social media'
 	option min_bytes '20000'
-	list domain 'instagram.com'
-	list domain 'cdninstagram.com'
-	list domain 'facebook.com'
-	list domain 'fbcdn.net'
+
+config category 'games'
+	option label 'Games'
+	option min_bytes '20000'
+
+config service 'youtube'
+	option label 'YouTube'
+	option category 'video'
+	list domain 'googlevideo.com'
+
+config service 'netflix'
+	option label 'Netflix'
+	option category 'video'
+	list domain 'netflix.com'
+	list domain 'nflxvideo.net'
+	list domain 'nflxso.net'
+	list domain 'nflximg.net'
+
+config service 'twitch'
+	option label 'Twitch'
+	option category 'video'
+	list domain 'twitch.tv'
+	list domain 'ttvnw.net'
+	list domain 'jtvnw.net'
+
+config service 'disney'
+	option label 'Disney+'
+	option category 'video'
+	list domain 'disneyplus.com'
+	list domain 'dssott.com'
+	list domain 'bamgrid.com'
+
+config service 'hulu'
+	option label 'Hulu'
+	option category 'video'
+	list domain 'hulu.com'
+	list domain 'hulustream.com'
+
+config service 'prime'
+	option label 'Prime Video'
+	option category 'video'
+	list domain 'primevideo.com'
+	list domain 'aiv-cdn.net'
+	list domain 'aiv-delivery.net'
+
+config service 'vimeo'
+	option label 'Vimeo'
+	option category 'video'
+	list domain 'vimeo.com'
+	list domain 'vimeocdn.com'
+
+config service 'tiktok'
+	option label 'TikTok'
+	option category 'social'
 	list domain 'tiktok.com'
 	list domain 'tiktokv.com'
 	list domain 'tiktokcdn.com'
 	list domain 'tiktokcdn-us.com'
 	list domain 'byteoversea.com'
 	list domain 'ibytedtos.com'
+
+config service 'instagram'
+	option label 'Instagram'
+	option category 'social'
+	list domain 'instagram.com'
+	list domain 'cdninstagram.com'
+
+config service 'snapchat'
+	option label 'Snapchat'
+	option category 'social'
 	list domain 'snapchat.com'
 	list domain 'sc-cdn.net'
 	list domain 'snapkit.com'
-	list domain 'twitter.com'
-	list domain 'x.com'
-	list domain 'twimg.com'
-	list domain 'reddit.com'
-	list domain 'redd.it'
-	list domain 'redditmedia.com'
-	list domain 'redditstatic.com'
+
+config service 'facebook'
+	option label 'Facebook'
+	option category 'social'
+	list domain 'facebook.com'
+	list domain 'fbcdn.net'
+
+config service 'discord'
+	option label 'Discord'
+	option category 'social'
 	list domain 'discord.com'
 	list domain 'discordapp.com'
 	list domain 'discordapp.net'
 	list domain 'discord.gg'
+
+config service 'reddit'
+	option label 'Reddit'
+	option category 'social'
+	list domain 'reddit.com'
+	list domain 'redd.it'
+	list domain 'redditmedia.com'
+	list domain 'redditstatic.com'
+
+config service 'x'
+	option label 'X (Twitter)'
+	option category 'social'
+	list domain 'twitter.com'
+	list domain 'x.com'
+	list domain 'twimg.com'
+
+config service 'pinterest'
+	option label 'Pinterest'
+	option category 'social'
 	list domain 'pinterest.com'
 	list domain 'pinimg.com'
+
+config service 'threads'
+	option label 'Threads'
+	option category 'social'
 	list domain 'threads.net'
+
+config service 'bluesky'
+	option label 'Bluesky'
+	option category 'social'
 	list domain 'bsky.app'
 
-config category 'games'
-	option label 'Games'
-	option min_bytes '20000'
+config service 'roblox'
+	option label 'Roblox'
+	option category 'games'
 	list domain 'roblox.com'
 	list domain 'rbxcdn.com'
 	list domain 'rbx.com'
+
+config service 'fortnite'
+	option label 'Fortnite / Epic'
+	option category 'games'
 	list domain 'epicgames.com'
 	list domain 'epicgames.dev'
 	list domain 'fortnite.com'
+
+config service 'minecraft'
+	option label 'Minecraft'
+	option category 'games'
 	list domain 'minecraft.net'
 	list domain 'mojang.com'
 	list domain 'minecraftservices.com'

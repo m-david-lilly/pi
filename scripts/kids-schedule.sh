@@ -1,11 +1,11 @@
 #!/bin/sh
-# Per-kid internet schedules for the kids network: bedtimes and daily time
-# limits per category (video, social, games, ...).
+# Per-kid controls for the kids network: bedtimes, daily time limits per
+# category, and usage history for the analytics page.
 #
 #   kids-schedule.sh apply      evaluate everything now (cron, every minute)
 #   kids-schedule.sh status     machine-readable state for the dashboard
 #   kids-schedule.sh flush      remove both nft tables and the dnsmasq hooks
-#   kids-schedule.sh install    seed default categories, add cron, first apply
+#   kids-schedule.sh install    seed default categories/services, add cron, first apply
 #
 # /etc/config/kids_schedule (UCI):
 #
@@ -20,6 +20,10 @@
 #   config category 'video'
 #   	option label 'Video'
 #   	option min_bytes '50000'      # traffic in a minute that counts as "used"
+#
+#   config service 'youtube'
+#   	option label 'YouTube'
+#   	option category 'video'
 #   	list domain 'googlevideo.com'
 #
 # BEDTIMES. A `block` entry is "<days> HH:MM-HH:MM"; the days are the days the
@@ -29,13 +33,18 @@
 # before conntrack's established-accept and any redirect, so open connections
 # stop too. DHCP is still answered.
 #
-# LIMITS. dnsmasq adds the IPv4 answers for each category's domains to
-# `cat_<category>` (nftset=, set timeout 1d) in table inet kids_limits. A
-# dynamic set `use_<category>` keeps a byte counter per kid MAC. Each minute a
-# kid's total delta per category is compared with min_bytes; if exceeded the
-# minute counts. Once used >= limit (or limit is 0) the kid's MACs go into
-# `blk_<category>` and their traffic to that category is dropped until midnight.
-# Usage lives in /tmp (RAM): it resets at midnight and on reboot.
+# SERVICES, LIMITS, HISTORY. dnsmasq adds the IPv4 answers for each service's
+# domains to `svc_<service>` (nftset=, set timeout 1d) in table inet
+# kids_limits. A dynamic set `use_<service>` keeps a byte counter per MAC. Each
+# minute, per MAC, a service is "active" if its byte delta reaches its
+# category's min_bytes, and a category is active if the sum over its services
+# does. Active minutes are added to /tmp/kids-stats/YYYYMMDD.tsv
+# ("HH mac s|c id minutes"), copied to /etc/kids-stats twice an hour (kept
+# HISTORY_DAYS) for the analytics page. A kid's category minute counts toward
+# their limit if the category bytes summed over all their MACs reach
+# min_bytes; once used >= limit (or limit is 0) the kid's MACs go into
+# `blk_<category>` and their traffic to every service in it is dropped until
+# midnight. Limit usage lives in /tmp/kids-limits and resets at midnight/reboot.
 #
 # (No `set -u`: /lib/functions.sh references unset variables.)
 
@@ -44,6 +53,9 @@ LTABLE=kids_limits
 IFACE=br-kids
 STATE=/tmp/kids-schedule.state
 LDIR=/tmp/kids-limits
+SDIR=/tmp/kids-stats
+PERSIST=/etc/kids-stats
+HISTORY_DAYS=90
 
 . /lib/functions.sh
 
@@ -145,92 +157,80 @@ sync_table() {
 	EOF
 }
 
-# ── Daily limits ────────────────────────────────────────────────────
+# ── Categories and services ─────────────────────────────────────────
 
-# Default categories, written only when the config has none.
-seed_categories() {
-	[ -n "$(uci -q show kids_schedule | grep '=category$')" ] && return
+# Default categories and services, written only when the config has no
+# services. Older configs kept domain lists on the categories themselves;
+# those are dropped in favour of the per-service lists.
+seed_defaults() {
+	[ -n "$(uci -q show kids_schedule | grep '=service$')" ] && return
 	touch /etc/config/kids_schedule
-	uci -q batch <<-EOF
-	set kids_schedule.video=category
-	set kids_schedule.video.label='Video'
-	set kids_schedule.video.min_bytes='50000'
-	add_list kids_schedule.video.domain='googlevideo.com'
-	add_list kids_schedule.video.domain='nflxvideo.net'
-	add_list kids_schedule.video.domain='netflix.com'
-	add_list kids_schedule.video.domain='twitch.tv'
-	add_list kids_schedule.video.domain='ttvnw.net'
-	add_list kids_schedule.video.domain='jtvnw.net'
-	add_list kids_schedule.video.domain='disneyplus.com'
-	add_list kids_schedule.video.domain='dssott.com'
-	add_list kids_schedule.video.domain='bamgrid.com'
-	add_list kids_schedule.video.domain='hulu.com'
-	add_list kids_schedule.video.domain='hulustream.com'
-	add_list kids_schedule.video.domain='vimeo.com'
-	add_list kids_schedule.video.domain='vimeocdn.com'
-	add_list kids_schedule.video.domain='aiv-cdn.net'
-	add_list kids_schedule.video.domain='primevideo.com'
-	set kids_schedule.social=category
-	set kids_schedule.social.label='Social media'
-	set kids_schedule.social.min_bytes='20000'
-	add_list kids_schedule.social.domain='instagram.com'
-	add_list kids_schedule.social.domain='cdninstagram.com'
-	add_list kids_schedule.social.domain='facebook.com'
-	add_list kids_schedule.social.domain='fbcdn.net'
-	add_list kids_schedule.social.domain='tiktok.com'
-	add_list kids_schedule.social.domain='tiktokv.com'
-	add_list kids_schedule.social.domain='tiktokcdn.com'
-	add_list kids_schedule.social.domain='tiktokcdn-us.com'
-	add_list kids_schedule.social.domain='byteoversea.com'
-	add_list kids_schedule.social.domain='ibytedtos.com'
-	add_list kids_schedule.social.domain='snapchat.com'
-	add_list kids_schedule.social.domain='sc-cdn.net'
-	add_list kids_schedule.social.domain='snapkit.com'
-	add_list kids_schedule.social.domain='twitter.com'
-	add_list kids_schedule.social.domain='x.com'
-	add_list kids_schedule.social.domain='twimg.com'
-	add_list kids_schedule.social.domain='reddit.com'
-	add_list kids_schedule.social.domain='redd.it'
-	add_list kids_schedule.social.domain='redditmedia.com'
-	add_list kids_schedule.social.domain='redditstatic.com'
-	add_list kids_schedule.social.domain='discord.com'
-	add_list kids_schedule.social.domain='discordapp.com'
-	add_list kids_schedule.social.domain='discordapp.net'
-	add_list kids_schedule.social.domain='discord.gg'
-	add_list kids_schedule.social.domain='pinterest.com'
-	add_list kids_schedule.social.domain='pinimg.com'
-	add_list kids_schedule.social.domain='threads.net'
-	add_list kids_schedule.social.domain='bsky.app'
-	set kids_schedule.games=category
-	set kids_schedule.games.label='Games'
-	set kids_schedule.games.min_bytes='20000'
-	add_list kids_schedule.games.domain='roblox.com'
-	add_list kids_schedule.games.domain='rbxcdn.com'
-	add_list kids_schedule.games.domain='rbx.com'
-	add_list kids_schedule.games.domain='epicgames.com'
-	add_list kids_schedule.games.domain='epicgames.dev'
-	add_list kids_schedule.games.domain='fortnite.com'
-	add_list kids_schedule.games.domain='minecraft.net'
-	add_list kids_schedule.games.domain='mojang.com'
-	add_list kids_schedule.games.domain='minecraftservices.com'
-	EOF
+	for c in $(uci -q show kids_schedule | sed -n 's/^kids_schedule\.\([A-Za-z0-9_]*\)=category$/\1/p'); do
+		uci -q delete "kids_schedule.$c.domain"
+	done
+	{
+		cat_def() { echo "set kids_schedule.$1=category"; echo "set kids_schedule.$1.label='$2'"; echo "set kids_schedule.$1.min_bytes='$3'"; }
+		svc_def() {
+			id=$1 cat=$2 label=$3; shift 3
+			echo "set kids_schedule.$id=service"
+			echo "set kids_schedule.$id.label='$label'"
+			echo "set kids_schedule.$id.category='$cat'"
+			for d in "$@"; do echo "add_list kids_schedule.$id.domain='$d'"; done
+		}
+		cat_def video 'Video' 50000
+		cat_def social 'Social media' 20000
+		cat_def games 'Games' 20000
+		svc_def youtube video 'YouTube' googlevideo.com
+		svc_def netflix video 'Netflix' netflix.com nflxvideo.net nflxso.net nflximg.net
+		svc_def twitch video 'Twitch' twitch.tv ttvnw.net jtvnw.net
+		svc_def disney video 'Disney+' disneyplus.com dssott.com bamgrid.com
+		svc_def hulu video 'Hulu' hulu.com hulustream.com
+		svc_def prime video 'Prime Video' primevideo.com aiv-cdn.net aiv-delivery.net
+		svc_def vimeo video 'Vimeo' vimeo.com vimeocdn.com
+		svc_def tiktok social 'TikTok' tiktok.com tiktokv.com tiktokcdn.com tiktokcdn-us.com byteoversea.com ibytedtos.com
+		svc_def instagram social 'Instagram' instagram.com cdninstagram.com
+		svc_def snapchat social 'Snapchat' snapchat.com sc-cdn.net snapkit.com
+		svc_def facebook social 'Facebook' facebook.com fbcdn.net
+		svc_def discord social 'Discord' discord.com discordapp.com discordapp.net discord.gg
+		svc_def reddit social 'Reddit' reddit.com redd.it redditmedia.com redditstatic.com
+		svc_def x social 'X (Twitter)' twitter.com x.com twimg.com
+		svc_def pinterest social 'Pinterest' pinterest.com pinimg.com
+		svc_def threads social 'Threads' threads.net
+		svc_def bluesky social 'Bluesky' bsky.app
+		svc_def roblox games 'Roblox' roblox.com rbxcdn.com rbx.com
+		svc_def fortnite games 'Fortnite / Epic' epicgames.com epicgames.dev fortnite.com
+		svc_def minecraft games 'Minecraft' minecraft.net mojang.com minecraftservices.com
+	} | uci -q batch
 	uci commit kids_schedule
 	config_load kids_schedule
 }
 
-# Sets CATS (category ids) from the loaded config.
-load_categories() {
-	CATS=""
-	collect_cat() { CATS="$CATS $1"; }
+# Sets CATS, SVCS, SVCMAP ("svc:cat ...") and MINMAP ("cat:bytes ...").
+load_catalog() {
+	CATS="" SVCS="" SVCMAP="" MINMAP=""
+	collect_cat() {
+		local mb
+		config_get mb "$1" min_bytes 20000
+		CATS="$CATS $1"; MINMAP="$MINMAP $1:$mb"
+	}
+	collect_svc() {
+		local sc
+		config_get sc "$1" category
+		case " $CATS " in *" $sc "*) ;; *) return ;; esac
+		SVCS="$SVCS $1"; SVCMAP="$SVCMAP $1:$sc"
+	}
 	config_foreach collect_cat category
+	config_foreach collect_svc service
 }
+
+svc_cat() { echo " $SVCMAP " | sed -n "s/.* $1:\([^ ]*\) .*/\1/p"; }
 
 # Fingerprint of everything that shapes the limits table / dnsmasq hooks.
-categories_sig() {
-	uci -q show kids_schedule | grep -E "^kids_schedule\.[A-Za-z0-9_]+(=category|\.domain=)" | md5sum | cut -d' ' -f1
+catalog_sig() {
+	uci -q show kids_schedule | grep -E "^kids_schedule\.[A-Za-z0-9_]+(=category|=service|\.domain=|\.category=)" | md5sum | cut -d' ' -f1
 }
 
-# (Re)create table inet kids_limits. Only runs when categories change or the
+# (Re)create table inet kids_limits. Only runs when the catalog changes or the
 # table is missing: recreating it empties the dnsmasq-filled IP sets.
 build_limits_table() {
 	{
@@ -238,81 +238,144 @@ build_limits_table() {
 		echo "delete table inet $LTABLE"
 		echo "table inet $LTABLE {"
 		for c in $CATS; do
-			echo "	set cat_$c { type ipv4_addr; flags timeout; timeout 1d; }"
-			echo "	set use_$c { type ether_addr; flags dynamic; counter; size 1024; }"
 			echo "	set blk_$c { type ether_addr; }"
+		done
+		for s in $SVCS; do
+			echo "	set svc_$s { type ipv4_addr; flags timeout; timeout 1d; }"
+			echo "	set use_$s { type ether_addr; flags dynamic; counter; size 1024; }"
 		done
 		echo "	chain prerouting {"
 		echo "		type filter hook prerouting priority -149; policy accept;"
-		for c in $CATS; do
-			echo "		iifname \"$IFACE\" ether saddr @blk_$c ip daddr @cat_$c counter drop comment \"kids-limits: $c over limit\""
-			echo "		iifname \"$IFACE\" ip daddr @cat_$c update @use_$c { ether saddr } comment \"kids-limits: meter $c\""
+		for s in $SVCS; do
+			c=$(svc_cat "$s")
+			echo "		iifname \"$IFACE\" ether saddr @blk_$c ip daddr @svc_$s counter drop comment \"kids-limits: $c over limit ($s)\""
+			echo "		iifname \"$IFACE\" ip daddr @svc_$s update @use_$s { ether saddr } comment \"kids-limits: meter $s\""
 		done
 		echo "	}"
 		echo "}"
 	} | nft -f -
 }
 
-# Point dnsmasq at the category sets: one `config ipset 'kidslim_<cat>'` per
-# category in /etc/config/dhcp (OpenWrt's dnsmasq init turns these into
-# --nftset=/dom1/dom2/4#inet#kids_limits#cat_<cat>). Replaces our old sections.
+# Point dnsmasq at the service sets: one `config ipset 'kidslim_<service>'`
+# per service in /etc/config/dhcp (OpenWrt's dnsmasq init turns these into
+# --nftset=/dom1/dom2/4#inet#kids_limits#svc_<service>). Replaces all of our
+# previous kidslim_* sections.
 sync_dnsmasq() {
-	for s in $(uci -q show dhcp | sed -n 's/^dhcp\.\(kidslim_[A-Za-z0-9_]*\)=ipset$/\1/p'); do
-		uci -q delete "dhcp.$s"
+	for sec in $(uci -q show dhcp | sed -n 's/^dhcp\.\(kidslim_[A-Za-z0-9_]*\)=ipset$/\1/p'); do
+		uci -q delete "dhcp.$sec"
 	done
-	# Not `c`: config_list_foreach uses a local `c` as its loop counter, which
-	# would shadow ours inside the callback.
-	add_dom() { uci add_list "dhcp.kidslim_$cat_id.domain=$1"; }
-	for cat_id in $CATS; do
-		uci set "dhcp.kidslim_$cat_id=ipset"
-		uci add_list "dhcp.kidslim_$cat_id.name=cat_$cat_id"
-		uci set "dhcp.kidslim_$cat_id.table=$LTABLE"
-		uci set "dhcp.kidslim_$cat_id.table_family=inet"
-		uci set "dhcp.kidslim_$cat_id.family=4"
-		config_list_foreach "$cat_id" domain add_dom
+	# Not `c`/`s`: config_list_foreach uses a local `c` as its loop counter,
+	# which would shadow ours inside the callback.
+	add_dom() { uci add_list "dhcp.kidslim_$svc_id.domain=$1"; }
+	for svc_id in $SVCS; do
+		uci set "dhcp.kidslim_$svc_id=ipset"
+		uci add_list "dhcp.kidslim_$svc_id.name=svc_$svc_id"
+		uci set "dhcp.kidslim_$svc_id.table=$LTABLE"
+		uci set "dhcp.kidslim_$svc_id.table_family=inet"
+		uci set "dhcp.kidslim_$svc_id.family=4"
+		config_list_foreach "$svc_id" domain add_dom
 	done
 	uci commit dhcp
 	/etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
 
-# "mac bytes" per line from the use_<cat> counters.
+# "svc mac bytes" for every use_<service> element, from one nft listing.
 read_use() {
-	nft list set inet $LTABLE "use_$1" 2>/dev/null | tr ',{}' '\n\n\n' |
-		sed -n 's/^[[:space:]]*\([0-9a-f:]\{17\}\) .*bytes \([0-9]*\).*/\1 \2/p'
+	nft list table inet $LTABLE 2>/dev/null | awk '
+		/^[[:space:]]*set use_/ { svc = $2; sub(/^use_/, "", svc); inset = 1; next }
+		/^[[:space:]]*set / { inset = 0; next }
+		/^[[:space:]]*chain / { inset = 0; next }
+		inset {
+			n = split($0, parts, ",")
+			for (i = 1; i <= n; i++)
+				# Spelled out: BusyBox awk regexes may not support {n} intervals.
+				if (match(parts[i], /[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f] counter packets [0-9]+ bytes [0-9]+/)) {
+					split(substr(parts[i], RSTART, RLENGTH), f, " ")
+					print svc, f[1], f[6]
+				}
+		}'
 }
 
-# Meter one minute, update today's usage and the over-limit sets.
-# Sets LIMITS ("<kid> <cat> <used> <max> <0|1>" lines) for status.
+# Persist today's stats to flash and retire old days.
+persist_stats() {
+	mkdir -p "$PERSIST"
+	cp "$SDIR/$day.tsv" "$PERSIST/$day.tsv.tmp" && mv "$PERSIST/$day.tsv.tmp" "$PERSIST/$day.tsv"
+	cutoff=$(date -d "@$(( $(date +%s) - HISTORY_DAYS * 86400 ))" +%Y%m%d)
+	for f in "$PERSIST"/*.tsv; do
+		[ -e "$f" ] || continue
+		b=${f##*/}; b=${b%.tsv}
+		[ "$b" -lt "$cutoff" ] 2>/dev/null && rm -f "$f"
+	done
+}
+
+# Meter one minute: record history, update today's limit usage and the
+# over-limit sets. Sets LIMITS ("<kid> <cat> <used> <max> <0|1>" lines).
 apply_limits() {
-	mkdir -p "$LDIR"
-	load_categories
-	sig=$(categories_sig)
+	mkdir -p "$LDIR" "$SDIR"
+	load_catalog
+	sig=$(catalog_sig)
 	if ! nft list table inet $LTABLE >/dev/null 2>&1 || [ "$sig" != "$(cat "$LDIR/sig" 2>/dev/null)" ]; then
 		build_limits_table || { logger -t kids-schedule "failed to build limits table"; return 1; }
 		sync_dnsmasq
 		echo "$sig" > "$LDIR/sig"
-		rm -f "$LDIR"/last_*
+		rm -f "$LDIR/last"
 	fi
 
 	day=$(date +%Y%m%d)
+	hour=$(date +%H)
+	minute=$(date +%M)
+
+	# Day rollover: finalize earlier /tmp stats files to flash, then drop them.
+	for f in "$SDIR"/*.tsv; do
+		[ -e "$f" ] || continue
+		[ "$f" = "$SDIR/$day.tsv" ] && continue
+		mkdir -p "$PERSIST" && cp "$f" "$PERSIST/${f##*/}" && rm -f "$f"
+	done
+	# After a reboot, continue today's history from the last flash copy.
+	[ -f "$SDIR/$day.tsv" ] || { [ -f "$PERSIST/$day.tsv" ] && cp "$PERSIST/$day.tsv" "$SDIR/$day.tsv"; }
+	touch "$SDIR/$day.tsv"
+
 	usage="$LDIR/usage-$day"
 	touch "$usage"
 	for f in "$LDIR"/usage-*; do
 		[ "$f" = "$usage" ] || rm -f "$f"
 	done
 
-	# Per-MAC byte delta since last minute, per category (counter reset -> use cur).
-	for c in $CATS; do
-		touch "$LDIR/last_$c"
-		read_use "$c" > "$LDIR/cur_$c"
-		# FILENAME, not NR==FNR: the latter misfires when the last_ file is empty.
-		awk 'FILENAME == ARGV[1] { last[$1] = $2; next } { d = $2 - last[$1]; if (d < 0) d = $2; print $1, d }' \
-			"$LDIR/last_$c" "$LDIR/cur_$c" > "$LDIR/delta_$c"
-		mv "$LDIR/cur_$c" "$LDIR/last_$c"
-	done
+	# Byte deltas per (service, MAC) since last minute (counter reset -> use cur).
+	touch "$LDIR/last"
+	read_use > "$LDIR/cur"
+	awk 'FILENAME == ARGV[1] { last[$1 " " $2] = $3; next }
+	     { d = $3 - last[$1 " " $2]; if (d < 0) d = $3; if (d > 0) print $1, $2, d }' \
+		"$LDIR/last" "$LDIR/cur" > "$LDIR/delta"
+	mv "$LDIR/cur" "$LDIR/last"
+
+	# This minute's activity: active services and categories per MAC (history),
+	# and category bytes per MAC (for limits).
+	awk -v H="$hour" -v svcmap="$SVCMAP" -v minmap="$MINMAP" -v catbytes="$LDIR/catbytes" '
+		BEGIN {
+			n = split(svcmap, a, " "); for (i = 1; i <= n; i++) { split(a[i], p, ":"); cat[p[1]] = p[2] }
+			n = split(minmap, a, " "); for (i = 1; i <= n; i++) { split(a[i], p, ":"); minb[p[1]] = p[2] }
+		}
+		{
+			c = cat[$1]; if (c == "") next
+			if ($3 >= minb[c]) print H, $2, "s", $1, 1
+			cb[$2 " " c] += $3
+		}
+		END {
+			printf "" > catbytes
+			for (k in cb) {
+				split(k, p, " ")
+				print p[1], p[2], cb[k] > catbytes
+				if (cb[k] >= minb[p[2]]) print H, p[1], "c", p[2], 1
+			}
+		}' "$LDIR/delta" > "$LDIR/minute"
+	if [ -s "$LDIR/minute" ]; then
+		awk '{ t[$1 " " $2 " " $3 " " $4] += $5 } END { for (k in t) print k, t[k] }' \
+			"$SDIR/$day.tsv" "$LDIR/minute" > "$SDIR/$day.tsv.new" && mv "$SDIR/$day.tsv.new" "$SDIR/$day.tsv"
+	fi
+	case "$minute" in 29|59) persist_stats ;; esac
 
 	LIMITS=""
-	nft_cmds=""
 	for c in $CATS; do eval "blk_$c=''"; done
 	each_limit() {
 		lc=${1% *}; max=${1#* }
@@ -321,12 +384,9 @@ apply_limits() {
 		config_get min_bytes "$lc" min_bytes 20000
 		used=$(awk -v k="$kid" -v c="$lc" '$1 == k && $2 == c { print $3 }' "$usage")
 		used=${used:-0}
-		# Count this minute if the kid's devices moved enough bytes in this category.
-		bytes=0
-		for m in $kmacs; do
-			b=$(awk -v m="$m" '$1 == m { print $2 }' "$LDIR/delta_$lc")
-			bytes=$(( bytes + ${b:-0} ))
-		done
+		bytes=$(awk -v macs="$kmacs" -v c="$lc" '
+			BEGIN { n = split(macs, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
+			want[$1] && $2 == c { s += $3 } END { print s + 0 }' "$LDIR/catbytes")
 		if [ "$max" -gt 0 ] && [ "$used" -lt "$max" ] && [ "$bytes" -ge "$min_bytes" ]; then
 			used=$(( used + 1 ))
 			[ "$used" -ge "$max" ] && logger -t kids-schedule "$kid: $lc limit reached ($max min)"
@@ -345,6 +405,7 @@ apply_limits() {
 	done
 	mv "$usage.new" "$usage"
 
+	nft_cmds=""
 	for c in $CATS; do
 		eval "elems=\$blk_$c"
 		elems=$(echo $elems | tr ' ' ',')
@@ -358,7 +419,7 @@ apply_limits() {
 
 # Current usage without metering (for status): reads today's file only.
 read_limits() {
-	load_categories
+	load_catalog
 	usage="$LDIR/usage-$(date +%Y%m%d)"
 	LIMITS=""
 	each_limit_ro() {
@@ -399,9 +460,10 @@ apply)
 	apply_limits
 	;;
 status)
-	# kid <id> blocked=<0|1> window=<HH:MM-HH:MM|-|disabled>
-	# limit <id> <category> used=<min> max=<min> over=<0|1>
+	# <kid> blocked=<0|1> window=<HH:MM-HH:MM|-|disabled>
+	# limit <kid> <category> used=<min> max=<min> over=<0|1>
 	# category <id> <label>
+	# service <id> <category> <label>
 	evaluate
 	echo "$RESULT" | while read -r kid blocked win; do
 		[ -n "$kid" ] && echo "$kid blocked=$blocked window=$win"
@@ -414,18 +476,25 @@ status)
 		config_get label "$c" label "$c"
 		echo "category $c $label"
 	done
+	for s in $SVCS; do
+		config_get label "$s" label "$s"
+		echo "service $s $(svc_cat "$s") $label"
+	done
 	nft list table inet $TABLE >/dev/null 2>&1 && echo "table=applied" || echo "table=absent"
 	;;
 flush)
 	nft delete table inet $TABLE 2>/dev/null
 	nft delete table inet $LTABLE 2>/dev/null
-	CATS=""
+	SVCS=""
 	sync_dnsmasq
-	rm -rf "$STATE" "$LDIR"
+	# Keep today's history: persist it before clearing RAM state.
+	day=$(date +%Y%m%d)
+	[ -f "$SDIR/$day.tsv" ] && persist_stats
+	rm -rf "$STATE" "$LDIR" "$SDIR"
 	;;
 install)
 	config_load kids_schedule
-	seed_categories
+	seed_defaults
 	grep -q 'kids-schedule.sh apply' /etc/crontabs/root 2>/dev/null || \
 		echo '* * * * * /usr/bin/kids-schedule.sh apply' >> /etc/crontabs/root
 	/etc/init.d/cron enable
