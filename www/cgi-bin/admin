@@ -461,6 +461,11 @@ get_vpn_raw() {
 handle_post_with_data() {
 	POSTDATA="$1"
 	action=$(echo "$POSTDATA" | jsonfilter -e '@.action' 2>/dev/null)
+	# NOTE: abort a branch with `return`, never `break`. In BusyBox ash a `break`
+	# outside a loop is a silent no-op even when it sits in a case branch, so the
+	# handler would fall through, emit a second JSON body, and still run the
+	# action (e.g. `change_password` rewrote credentials with a wrong current
+	# password).
 	case "$action" in
 		adblock_reload)
 			send_json
@@ -504,12 +509,12 @@ handle_post_with_data() {
 			server_id=$(echo "$POSTDATA" | jsonfilter -e '@.server' 2>/dev/null)
 			if [ -z "$server_id" ] || ! is_safe_id "$server_id"; then
 				echo '{"ok":false,"message":"invalid server id"}'
-				break
+				return
 			fi
 			conf_file="$SERVERS_DIR/$server_id.conf"
 			if ! parse_conf "$conf_file"; then
 				echo '{"ok":false,"message":"server not found"}'
-				break
+				return
 			fi
 			new_name=$(server_name "$server_id")
 			was_up=$(ubus call network.interface.wgvpn status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)
@@ -532,7 +537,7 @@ handle_post_with_data() {
 			state=$(echo "$POSTDATA" | jsonfilter -e '@.state' 2>/dev/null)
 			case "$iface" in
 				wan1|wan2) ;;
-				*) echo '{"ok":false,"message":"invalid interface"}'; break ;;
+				*) echo '{"ok":false,"message":"invalid interface"}'; return ;;
 			esac
 			case "$state" in
 				enable)
@@ -581,7 +586,7 @@ handle_post_with_data() {
 			done
 			if [ -z "$pkgs_safe" ]; then
 				echo '{"ok":false,"message":"no valid packages selected"}'
-				break
+				return
 			fi
 			apk update >/dev/null 2>&1
 			result=$(apk add --upgrade $pkgs_safe 2>&1)
@@ -611,17 +616,17 @@ handle_post_with_data() {
 			new_pass=$(echo "$POSTDATA" | jsonfilter -e '@.new_password' 2>/dev/null)
 			if [ -z "$cur_pass" ] || [ -z "$new_pass" ]; then
 				echo '{"ok":false,"message":"Missing fields"}'
-				break
+				return
 			fi
 			stored=$(cat "$CRED_FILE" 2>/dev/null)
 			expected_user=$(echo "$stored" | cut -d: -f1)
 			if ! verify_password "$expected_user" "$cur_pass"; then
 				echo '{"ok":false,"message":"Current password is incorrect"}'
-				break
+				return
 			fi
 			if [ ${#new_pass} -lt 4 ]; then
 				echo '{"ok":false,"message":"New password must be at least 4 characters"}'
-				break
+				return
 			fi
 			new_salt=$(head -c 16 /dev/urandom | hexdump -e '16/1 "%02x"')
 			new_hash=$(hash_password "$new_salt" "$new_pass")
