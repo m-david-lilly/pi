@@ -1,7 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"crypto/x509"
+	"database/sql"
 	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -338,5 +346,263 @@ func TestParseClientHelloNoSNI(t *testing.T) {
 	}
 	if _, err := parseClientHello([]byte{0x01, 0xff, 0xff, 0xff}); err == nil {
 		t.Error("expected error for truncated ClientHello")
+	}
+}
+
+func TestCALeafSignedByCA(t *testing.T) {
+	dir := t.TempDir()
+	if err := initCA(dir); err != nil {
+		t.Fatalf("initCA: %v", err)
+	}
+	ca, err := loadCA(filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"), 7)
+	if err != nil {
+		t.Fatalf("loadCA: %v", err)
+	}
+	if got := ca.cert.Subject.CommonName; got != "Kids Filter CA" {
+		t.Errorf("CA CN = %q", got)
+	}
+
+	leaf, err := ca.leaf("example.com")
+	if err != nil {
+		t.Fatalf("leaf: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	if got := parsed.Issuer.CommonName; got != "Kids Filter CA" {
+		t.Errorf("leaf issuer = %q, want Kids Filter CA", got)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.cert)
+	if _, err := parsed.Verify(x509.VerifyOptions{DNSName: "example.com", Roots: roots}); err != nil {
+		t.Errorf("leaf does not verify against the CA: %v", err)
+	}
+
+	ipLeaf, err := ca.leaf("192.168.30.1")
+	if err != nil {
+		t.Fatalf("ip leaf: %v", err)
+	}
+	ipParsed, err := x509.ParseCertificate(ipLeaf.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse ip leaf: %v", err)
+	}
+	if _, err := ipParsed.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		t.Errorf("ip leaf does not verify: %v", err)
+	}
+	if len(ipParsed.IPAddresses) != 1 || ipParsed.IPAddresses[0].String() != "192.168.30.1" {
+		t.Errorf("ip SANs = %v", ipParsed.IPAddresses)
+	}
+}
+
+// TestPlainHTTPReplaysPeekedBytes pins the fix for a transparent-mode hang:
+// handleConn Peeks the first byte (which buffers the whole request) and then
+// hands the connection to the HTTP server. Pushing the raw conn dropped those
+// buffered bytes, so every plain-HTTP request stalled until it timed out.
+func TestPlainHTTPReplaysPeekedBytes(t *testing.T) {
+	old := originalDstFunc
+	originalDstFunc = func(net.Conn) (string, int, error) { return "192.168.30.1", 80, nil }
+	defer func() { originalDstFunc = old }()
+
+	dir := t.TempDir()
+	if err := initCA(dir); err != nil {
+		t.Fatalf("initCA: %v", err)
+	}
+	ca, err := loadCA(filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key"), 7)
+	if err != nil {
+		t.Fatalf("loadCA: %v", err)
+	}
+	cfg := &Config{}
+	cfg.Network.Gateway = "192.168.30.1"
+	p := newProxy(cfg, ca, nil, nil)
+	go func() { _ = p.srv.Serve(p.queue) }()
+	defer func() { _ = p.srv.Close() }()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			p.handleConn(c, true)
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: 192.168.30.1\r\n\r\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Kids network setup") {
+		t.Errorf("bootstrap page not served, got %d bytes", len(body))
+	}
+}
+
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := writableDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	return db
+}
+
+func TestRulesAllowOverridesBlock(t *testing.T) {
+	db := testDB(t)
+	cfg := &Config{}
+	cfg.Block.Domains = []string{"example.com"}
+	r := newRules(cfg, db)
+
+	if ok, _ := r.blocked("www.example.com"); !ok {
+		t.Fatal("config block not applied")
+	}
+	if _, err := insertRule(db, "domain", "allow", "example.com", "parent approved"); err != nil {
+		t.Fatalf("insertRule: %v", err)
+	}
+	r.reload()
+	if ok, note := r.blocked("www.example.com"); ok {
+		t.Errorf("allow rule did not override the block (note %q)", note)
+	}
+	if ok, _ := r.blocked("unrelated.test"); ok {
+		t.Error("unrelated host blocked")
+	}
+
+	// Removing the allow rule restores the block.
+	if _, err := insertRule(db, "domain", "block", "other.test", ""); err != nil {
+		t.Fatalf("insertRule: %v", err)
+	}
+	r.reload()
+	if ok, _ := r.blocked("other.test"); !ok {
+		t.Error("dashboard block rule not applied")
+	}
+}
+
+func TestInsertDeleteRule(t *testing.T) {
+	db := testDB(t)
+	id, err := insertRule(db, "domain", "block", "bad.test", "test note")
+	if err != nil {
+		t.Fatalf("insertRule: %v", err)
+	}
+	var value, note string
+	if err := db.QueryRow(`SELECT value, note FROM rules WHERE id=?`, id).Scan(&value, &note); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if value != "bad.test" || note != "test note" {
+		t.Errorf("stored %q / %q", value, note)
+	}
+	ok, err := deleteRule(db, id)
+	if err != nil || !ok {
+		t.Fatalf("deleteRule = %v, %v", ok, err)
+	}
+	if ok, _ := deleteRule(db, id); ok {
+		t.Error("second delete reported a row")
+	}
+}
+
+func TestCollectStats(t *testing.T) {
+	db := testDB(t)
+	now := time.Now().Unix()
+	for _, ts := range []int64{now - 60, now - 120, now - 86400*3} {
+		if _, err := db.Exec(`INSERT INTO events(ts,device,host,url,action) VALUES(?,?,?,?,?)`,
+			ts, "kid-tablet", "example.com", "https://example.com/", "bump"); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO alerts(ts,severity,kind,device,host,detail) VALUES(?,?,?,?,?,?)`,
+		now-30, "high", "keyword", "kid-tablet", "example.com", "matched keyword: x"); err != nil {
+		t.Fatalf("insert alert: %v", err)
+	}
+	if _, err := insertRule(db, "domain", "block", "bad.test", ""); err != nil {
+		t.Fatalf("insertRule: %v", err)
+	}
+
+	st, err := collectStats(db, now-3600)
+	if err != nil {
+		t.Fatalf("collectStats: %v", err)
+	}
+	if st.Events24h != 2 {
+		t.Errorf("events_24h = %d, want 2", st.Events24h)
+	}
+	if st.Alerts24h != 1 {
+		t.Errorf("alerts_24h = %d, want 1", st.Alerts24h)
+	}
+	if st.Devices24h != 1 {
+		t.Errorf("devices_24h = %d, want 1", st.Devices24h)
+	}
+	if st.Rules != 1 {
+		t.Errorf("rules = %d, want 1", st.Rules)
+	}
+	if st.LastEvent == "" {
+		t.Error("last_event empty")
+	}
+}
+
+func TestAllowAlertDedupesPerHour(t *testing.T) {
+	s := &Store{}
+	now := time.Now()
+	if !s.allowAlert("tls-pin|a.test|tablet", now) {
+		t.Fatal("first alert should pass")
+	}
+	if s.allowAlert("tls-pin|a.test|tablet", now.Add(30*time.Minute)) {
+		t.Error("repeat within the hour should be suppressed")
+	}
+	if !s.allowAlert("tls-pin|a.test|tablet", now.Add(61*time.Minute)) {
+		t.Error("alert after an hour should pass")
+	}
+	if !s.allowAlert("tls-pin|b.test|tablet", now.Add(30*time.Minute)) {
+		t.Error("different host should alert")
+	}
+}
+
+func TestDeleteAlerts(t *testing.T) {
+	db := testDB(t)
+	now := time.Now().Unix()
+	for _, kind := range []string{"tls-pin", "tls-pin", "blocked"} {
+		if _, err := db.Exec(`INSERT INTO alerts(ts,severity,kind,device,host,detail) VALUES(?,?,?,?,?,?)`,
+			now, "info", kind, "tablet", "example.com", ""); err != nil {
+			t.Fatalf("insert alert: %v", err)
+		}
+	}
+	n, err := deleteAlerts(db, "tls-pin")
+	if err != nil {
+		t.Fatalf("deleteAlerts: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("deleted %d tls-pin alerts, want 2", n)
+	}
+	var left int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM alerts`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 1 {
+		t.Errorf("alerts left = %d, want 1", left)
+	}
+	if _, err := deleteAlerts(db, ""); err != nil {
+		t.Fatalf("deleteAlerts all: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM alerts`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("alerts left after clear = %d", left)
 	}
 }

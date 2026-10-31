@@ -4,6 +4,7 @@
 #   kids-toggle.sh on            SSID up, proxy running, interception applied
 #   kids-toggle.sh off           SSID down, proxy stopped, interception flushed
 #   kids-toggle.sh pause [mins]  keep the SSID up but stop filtering (default 30)
+#   kids-toggle.sh resume         end a pause early
 #   kids-toggle.sh status        key=value output for the dashboard
 #   kids-toggle.sh resume-if-due cron helper; restores filtering when pause ends
 set -u
@@ -43,6 +44,12 @@ pause)
 	logger -t kids "filtering paused for ${mins}m"
 	echo "filtering paused for ${mins} min"
 	;;
+resume)
+	rm -f "$PAUSE_FILE"
+	/usr/bin/kids-nft.sh apply
+	logger -t kids "filtering resumed"
+	echo "filtering resumed"
+	;;
 resume-if-due)
 	[ -f "$PAUSE_FILE" ] || exit 0
 	now=$(date +%s)
@@ -64,7 +71,7 @@ status)
 	echo "pause_until=$pause_until"
 	;;
 *)
-	echo "usage: $0 on|off|pause [mins]|status|resume-if-due" >&2
+	echo "usage: $0 on|off|pause [mins]|resume|status|resume-if-due" >&2
 	exit 2
 	;;
 esac

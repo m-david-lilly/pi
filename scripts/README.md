@@ -24,6 +24,23 @@ The dashboard CGI dynamically loads VPN servers from `/etc/wireguard/servers/*.c
 drop a Surfshark WireGuard config file in and it appears in the UI. Auth credentials
 are in `/etc/piadmin/credentials` (default `admin`/`admin`, change via the UI).
 
+### Kids network (`kidproxy`)
+
+Optional, off-by-default kids WiFi whose web traffic is TLS-intercepted, filtered
+and logged. Design + limits: [`../docs/reference/kids-filtering.md`](../docs/reference/kids-filtering.md).
+
+| Script | Installs to | Purpose |
+|---|---|---|
+| `kids-setup.sh` | *(run from the repo copy)* | Idempotent setup: binary, `msmtp`, CA + WiFi key, UCI (network/DHCP/wireless/firewall), services, cron. Does not touch WANs/mwan3/adult LAN. |
+| `kids-toggle.sh` | `/usr/bin/kids-toggle.sh` | `on` / `off` / `pause [mins]` / `resume` / `status` / `resume-if-due`. |
+| `kids-nft.sh` | `/usr/bin/kids-nft.sh` | `apply` / `flush` / `status` the standalone `inet kidproxy` nft table. |
+| `kids-watchdog.sh` | `/usr/bin/kids-watchdog.sh` | Cron `*/5`: restart a dead proxy, email if it stays down, expire pauses. |
+| `build-kidproxy.ps1` | — | Cross-compiles `proxy/` to a static `linux/arm64` binary (`proxy/dist/kidproxy`). |
+
+The proxy itself (`proxy/`) is Go with a pure-Go SQLite driver: static, no runtime
+packages. `kidproxy run|check|ca|query|stats|rule|alerts|notify-test` — see the
+reference doc for the CLI and the dashboard Kids panel.
+
 Target shell is OpenWrt's BusyBox **ash** (POSIX `sh`), not bash.
 
 ## Install

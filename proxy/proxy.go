@@ -22,6 +22,10 @@ type ctxKey int
 
 const metaKey ctxKey = 1
 
+// originalDstFunc is a seam for tests: the real implementation reads
+// SO_ORIGINAL_DST, which only returns anything for a NATed socket.
+var originalDstFunc = originalDst
+
 type connMeta struct {
 	srcIP  string
 	host   string
@@ -157,7 +161,7 @@ func (p *Proxy) handleConn(c net.Conn, transparent bool) {
 	var dstHost string
 	var dstPort int
 	if transparent {
-		h, port, err := originalDst(c)
+		h, port, err := originalDstFunc(c)
 		if err != nil {
 			log.Printf("transparent: %v", err)
 			_ = c.Close()
@@ -179,11 +183,15 @@ func (p *Proxy) handleConn(c net.Conn, transparent bool) {
 	}
 
 	if first[0] != 0x16 {
-		// Plain HTTP: hand the untouched connection to the HTTP server.
+		// Plain HTTP: hand the connection to the HTTP server. Peek pulled the
+		// first request out of the socket and into br, so replay br -- pushing
+		// the raw conn drops those bytes and the server waits forever for a
+		// request that already arrived.
+		pc := &prefixConn{Conn: c, r: br}
 		meta := &connMeta{srcIP: remoteIP(c), host: dstHost, scheme: "http", port: dstPort}
-		p.conns.Store(c, meta)
+		p.conns.Store(pc, meta)
 		_ = c.SetReadDeadline(time.Time{})
-		p.queue.push(c)
+		p.queue.push(pc)
 		return
 	}
 

@@ -11,6 +11,11 @@ config/etc-config/*       text eol=lf
 config/kidproxy/*         text eol=lf
 config/mwan3              text eol=lf
 
+# Dashboard assets: the CGI is a shell script that runs on the Pi (CRLF breaks
+# ash with "bad interpreter"), and keeping the HTML LF too avoids mixed endings.
+www/cgi-bin/*   text eol=lf
+www/*.html      text eol=lf
+
 # Go sources and module files: LF keeps `gofmt -l` quiet on Windows.
 proxy/*.go                text eol=lf
 proxy/go.mod              text eol=lf

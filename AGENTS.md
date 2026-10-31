@@ -29,6 +29,10 @@ reach the box, and what's left. **Read it before touching anything** — several
 5. **Shell scripts and configs are LF-only** (`.gitattributes` enforces it). If you
    edit on Windows, do NOT let your editor save CRLF — a `\r` in a script fails on
    the Pi with `bad interpreter: /bin/sh^M`.
+6. There is an **optional kids network** (separate SSID, TLS-intercepting proxy,
+   its own CA, full logging + alerts). It is off by default and does not touch the
+   adult LAN. Read [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md)
+   before changing anything under `proxy/`, `config/kidproxy/` or the Kids panel.
 
 ---
 
@@ -46,7 +50,8 @@ reach the box, and what's left. **Read it before touching anything** — several
 | Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (SHA-256 hashed credentials in `/etc/piadmin/credentials`). HTTPS via local CA cert. Features: system/WAN/mwan3/adblock/DNS/VPN panels, per-WAN toggle switches, package update management with selective install, reboot, change password. |
 | Streaming fix | HTTPS sticky timeout set to **4 hours** (14400s) in mwan3. Prevents streaming services (Netflix, etc.) from breaking when mwan3 assigns new connections to a different WAN mid-session. Per-source-IP stickiness — each device stays on the same WAN for all HTTPS traffic for 4 hours. |
 | TLS | Local CA ("Pi Home CA") → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). |
-| Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled**. |
+| Kids network (optional) | `Home-Kids` SSID on the onboard 5 GHz radio → `br-kids` **192.168.30.0/24**, all 80/443 forced into `kidproxy` (transparent `:8080`, TLS-interception with its own **Kids Filter CA**), QUIC/DoT/VPN/SMTP/IPv6 blocked, nft table `inet kidproxy` (standalone, not fw4). Full-URL + page-text + YouTube metadata logged to `/var/lib/kidproxy/events.db`; alerts by email. Dashboard has a Kids panel. Off by default. See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md). |
+| Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled** — except when the kids network is on. |
 
 > This topology is the **inverse** of the original design (which put WAN1 on the
 > onboard port). Management stability across USB re-enumeration won over a marginal
@@ -135,6 +140,29 @@ firetv_tracking smarttv_tracking android_tracking` (~561k domains). **Do NOT add
 `dns.google` — those are the router's own DoH upstreams; blocking them blackholes
 its resolver.
 
+### 11. kidproxy: buffered bytes must be replayed into the HTTP server
+The transparent listener `Peek`s the first byte to tell TLS from plain HTTP. `Peek`
+fills the `bufio.Reader`, so the request is **no longer in the socket**. Pushing the
+raw `net.Conn` into the `http.Server` therefore drops the request and every
+`http://` request hangs until timeout (this broke the CA install page and all plain
+HTTP). The fix is `&prefixConn{Conn: c, r: br}`. Regression test:
+`TestPlainHTTPReplaysPeekedBytes` — it fails in ~5 s if you revert it. The
+`originalDstFunc` seam exists only so that test can run without a NATed socket.
+
+### 12. The explicit listener is CONNECT-only — `405` is correct
+`127.0.0.1:3128` is for testing from the Pi. `curl -x 127.0.0.1:3128 http://…`
+returns `405 Method Not Allowed` **by design**; plain HTTP is handled by the
+transparent path (`curl http://192.168.30.1:8080/` on the Pi). The CA install page
+is served through the transparent listener only.
+
+### 13. Dashboard files must be LF too (not just `*.sh`)
+`www/cgi-bin/admin` is a shell script executed by uhttpd, and `www/*.html` gets
+copied to the Pi verbatim. Both were once checked out CRLF, and `sh -n` on the Pi
+failed with `line 151: syntax error: unexpected word (expecting "in")` — the CGI
+returned 500 while the *repo* copy looked fine. `.gitattributes` now forces
+`text eol=lf` on `www/cgi-bin/*` and `www/*.html`. Check with
+`git ls-files --eol www/` (want `w/lf`) before blaming the script.
+
 ---
 
 ## Accessing the Pi
@@ -208,6 +236,8 @@ config/
   etc-config/{network,dhcp,system,adblock,https-dns-proxy}  # live UCI, pulled from Pi
   hotplug/05-rename-wan-by-mac                               # the NIC rename rule
   mwan3                                                       # mwan3 UCI (commented)
+  kidproxy/{config.yaml,kids.nft,*.init}                      # kids proxy config + nft + procd units
+proxy/                # kidproxy Go source (build with scripts/build-kidproxy.ps1)
 scripts/
   bringup.sh        # ONE-SHOT idempotent post-flash bring-up (does NOT renumber)
   wan-weight.sh     # cron */30 capacity probe -> mwan3 weight (ifup reapply)
@@ -215,12 +245,17 @@ scripts/
   vpn-toggle.sh     # Surfshark on/off/status        (staged, not yet exercised)
   stage-vpn.sh      # idempotent VPN+pbr staging      (staged)
   apply-wg-secret.sh# inject WG private key from /etc/wireguard/wgvpn.secret
+  kids-setup.sh     # idempotent kids-network setup (CA, SSID, UCI, services, cron)
+  kids-toggle.sh    # on|off|pause [mins]|resume|status|resume-if-due
+  kids-nft.sh       # apply|flush|status the inet kidproxy table
+  kids-watchdog.sh  # cron */5: restart proxy, expire pauses
+  build-kidproxy.ps1# cross-compile proxy/ -> static linux/arm64 binary
   README.md         # install + hardware-verified status
 www/
   admin.html        # single-page admin dashboard (HTML/JS/CSS)
   cgi-bin/admin     # shell CGI backend for the dashboard API + auth
 docs/
-  reference/{architecture,hardware,load-balancing,vpn}.md    # AS-BUILT (authoritative)
+  reference/{architecture,hardware,load-balancing,vpn,kids-filtering}.md  # AS-BUILT (authoritative)
   planning/requirements.md                                   # AS-BUILT (FR/NFR)
   runbooks/setup.md            # ORIGINAL design + as-built banner & callouts
 ```
@@ -228,6 +263,10 @@ docs/
 **Secrets:** `.claude/.secrets/` is gitignored — real keys/passwords live there,
 NEVER in tracked files. Tracked config uses placeholders (`<WG_PRIVATE_KEY>` etc.).
 The `.secrets/ca/` subdirectory holds the local CA key/cert for TLS.
+The **kids** secrets live only on the Pi and are never tracked:
+`/etc/kidproxy/ca.key` (the Kids Filter CA signing key, 0600) and
+`/etc/kidproxy/wifi.key` (the `Home-Kids` passphrase, 0600). `proxy/dist/` (the
+built binary) is gitignored too — rebuild it with `scripts/build-kidproxy.ps1`.
 Always scan a diff for secrets before committing.
 
 ---
@@ -242,10 +281,26 @@ IP-literal NTP, DoH, adblock+trigger, mwan3, crons; does NOT renumber). Reboot o
 to fire the hotplug NIC rename. Then: `mwan3 restart; /etc/init.d/adblock reload;
 /usr/bin/wan-weight.sh`.
 
+The **kids network is separate and optional**: build the binary
+(`scripts/build-kidproxy.ps1`), copy `config/kidproxy/`, `scripts/kids-*.sh` and
+`proxy/dist/kidproxy` over, then run `scripts/kids-setup.sh --src /tmp/pi`. It
+creates the CA and WiFi key if missing, so a re-flash means **re-installing the CA
+on every device**. Full checklist: `docs/reference/kids-filtering.md` §12.
+
 ---
 
 ## What's left (resume points)
 
+- **Kids network: alert email is not live.** The proxy, SSID, interception, logging
+  and dashboard panel are deployed and verified, but `notify.email.enabled` is
+  `false` and `/etc/msmtprc` still has placeholder SMTP settings
+  (`mail.oursite.example`). Fill in a real SMTP account, set `to:` (or run
+  `kids-setup.sh --email you@example.com`), then `kidproxy notify-test`.
+- **Kids network: CA is installed on no device yet.** Each device must trust
+  `Kids Filter CA` from `http://192.168.30.1/` before HTTPS works.
+- **Kids network: only one client has been exercised** (a Windows laptop on
+  `Home-Kids`, MAC `94:18:65:61:63:e1`). Android/iOS behaviour — especially
+  user-CA trust and app-level pinning — is documented but not verified on hardware.
 - **VPN DNS-leak closure (Phase 8.6):** real Surfshark creds are injected and
   multiple servers are configured in `/etc/wireguard/servers/`. What remains:
   wgvpn device-bind on https-dns-proxy + toggle switching dnsmasq upstream + a

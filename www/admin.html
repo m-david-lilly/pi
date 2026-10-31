@@ -173,6 +173,60 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 .btn-red { border-color: var(--red); color: var(--red); }
 .btn-red:hover { background: rgba(239,68,68,0.1); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.card-wide { grid-column: 1 / -1; }
+.card-wide h3 {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 18px 0 8px;
+}
+.kids-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.kids-list { max-height: 260px; overflow-y: auto; }
+.kids-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.kids-row:last-child { border-bottom: none; }
+.kids-row .time { color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 0.72rem; }
+.kids-row .who { color: var(--text-dim); flex-shrink: 0; }
+.kids-row .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.kids-row .what a { color: inherit; text-decoration: none; }
+.kids-empty { color: var(--text-dim); font-size: 0.8rem; padding: 6px 0; }
+.sev {
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 99px;
+}
+.sev-high { background: rgba(239,68,68,0.15); color: var(--red); }
+.sev-warn { background: rgba(245,158,11,0.15); color: var(--amber); }
+.sev-info { background: rgba(59,130,246,0.15); color: var(--accent); }
+.kids-tools, .kids-rule-form { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.kids-tools input, .kids-rule-form input, .kids-rule-form select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+.kids-tools input { flex: 1; min-width: 180px; }
+.kids-rule-form input { flex: 1; min-width: 180px; }
+.kids-rule { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 0.8rem; border-bottom: 1px solid var(--border); }
+.kids-rule:last-child { border-bottom: none; }
+.kids-rule .val { flex: 1; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 0.76rem; }
+.kids-rule .tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 99px; }
+.tag-block { background: rgba(239,68,68,0.15); color: var(--red); }
+.tag-allow { background: rgba(34,197,94,0.15); color: var(--green); }
 .mwan-policy { margin-bottom: 10px; }
 .mwan-policy-name {
   font-size: 0.82rem;
@@ -500,6 +554,42 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
     <div class="actions" id="upd-actions"></div>
   </div>
 
+  <!-- Kids network -->
+  <div class="card card-wide">
+    <h2>Kids Network <span class="badge" id="kids-badge"></span></h2>
+    <div id="kids-body"><span class="loading">Loading...</span></div>
+    <div class="actions" id="kids-actions"></div>
+
+    <div class="kids-split">
+      <div>
+        <h3>Alerts</h3>
+        <div class="kids-list" id="kids-alerts"></div>
+      </div>
+      <div>
+        <h3>Recent activity</h3>
+        <div class="kids-list" id="kids-events"></div>
+      </div>
+    </div>
+
+    <h3>Domain rules</h3>
+    <div id="kids-rules"></div>
+    <div class="kids-rule-form">
+      <input id="kids-domain" type="text" placeholder="example.com" autocomplete="off">
+      <select id="kids-rule-kind">
+        <option value="block">Block</option>
+        <option value="allow">Allow</option>
+      </select>
+      <button class="btn" onclick="addKidsRule()">Add rule</button>
+    </div>
+
+    <div class="kids-tools">
+      <input id="kids-search" type="text" placeholder="Search URLs and page text" autocomplete="off"
+             onkeydown="if(event.key==='Enter')searchKids()">
+      <button class="btn" onclick="searchKids()">Search</button>
+      <button class="btn" onclick="clearKidsSearch()">Clear</button>
+    </div>
+  </div>
+
 </div>
 
 <div class="toast" id="toast"></div>
@@ -526,6 +616,7 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 <script>
 const API = '/cgi-bin/admin';
 let refreshTimer;
+let kidsQuery = '';
 
 function formatUptime(s) {
   if (!s || s < 0) return '—';
@@ -753,6 +844,187 @@ function renderVpn(d) {
     : '<button class="btn btn-green" onclick="postAction(\'vpn_on\')">Connect</button>';
 }
 
+// ── Kids network ─────────────────────────────────────────────
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+  });
+}
+
+function shortTime(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  var now = new Date();
+  var sameDay = d.toDateString() === now.toDateString();
+  var t = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  return sameDay ? t : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + t;
+}
+
+function kidsIsPaused(d) {
+  return d.pause_until && (d.pause_until * 1000) > Date.now();
+}
+
+function renderKids(d) {
+  const badge = document.getElementById('kids-badge');
+  const body = document.getElementById('kids-body');
+  const actions = document.getElementById('kids-actions');
+  const paused = kidsIsPaused(d);
+  const running = d.proxy === 'running';
+  const applied = d.nft === 'applied';
+  const on = d.enabled === 1 || d.enabled === true;
+
+  if (!on) {
+    badge.textContent = 'Off';
+    badge.className = 'badge badge-down';
+  } else if (paused) {
+    badge.textContent = 'Paused';
+    badge.className = 'badge badge-warn';
+  } else if (running && applied) {
+    badge.textContent = 'Active';
+    badge.className = 'badge badge-up';
+  } else {
+    badge.textContent = 'Not filtering';
+    badge.className = 'badge badge-warn';
+  }
+
+  const st = d.stats || {};
+  let html =
+    statRow('Network', d.ssid ? d.ssid + ' (192.168.30.0/24)' : '—', 'The kids-only WiFi network. Its traffic is forced through the filtering proxy; the adult network is not affected.') +
+    statRow('Proxy', running ? 'Running' : 'Stopped', 'The TLS-intercepting proxy. Kids have no web access while it is stopped (fail-closed by design).') +
+    statRow('Interception', applied ? 'Applied' : 'Absent', 'Firewall rules that redirect kids web traffic into the proxy and block QUIC so browsers fall back to TCP.') +
+    statRow('Requests (24h)', Number(st.events_24h || 0).toLocaleString(), 'Web requests logged in the last 24 hours.') +
+    statRow('Alerts (24h)', Number(st.alerts_24h || 0).toLocaleString(), 'Rule matches and notable events in the last 24 hours.') +
+    statRow('Devices (24h)', Number(st.devices_24h || 0).toLocaleString(), 'Distinct devices that used the kids network in the last 24 hours.') +
+    statRow('Database', formatBytes(st.db_bytes || 0), 'Size of the local log database on the Pi. Old rows are pruned automatically.');
+
+  if (paused) {
+    html += statRow('Paused until', new Date(d.pause_until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}), 'Filtering is off until this time, then the cron helper restores it automatically.');
+  }
+
+  body.innerHTML = html;
+
+  if (!on) {
+    actions.innerHTML = '<button class="btn btn-green" onclick="postKids({action:\'kids_on\'})">Turn on</button>';
+  } else if (paused) {
+    actions.innerHTML = '<button class="btn btn-green" onclick="postKids({action:\'kids_resume\'})">Resume now</button>' +
+      '<button class="btn btn-red" onclick="postKids({action:\'kids_off\'})">Turn off</button>';
+  } else {
+    actions.innerHTML =
+      '<select id="kids-pause-mins" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:0.8rem">' +
+      '<option value="15">15 min</option><option value="30" selected>30 min</option>' +
+      '<option value="60">1 hour</option><option value="120">2 hours</option></select>' +
+      '<button class="btn" onclick="pauseKids()">Pause filtering</button>' +
+      '<button class="btn btn-red" onclick="postKids({action:\'kids_off\'})">Turn off</button>';
+  }
+
+  const alerts = document.getElementById('kids-alerts');
+  if (!d.alerts || d.alerts.length === 0) {
+    alerts.innerHTML = '<div class="kids-empty">No alerts.</div>';
+  } else {
+    alerts.innerHTML = d.alerts.map(function(a) {
+      var sev = a.severity || 'info';
+      return '<div class="kids-row">' +
+        '<span class="sev sev-' + esc(sev) + '">' + esc(sev) + '</span>' +
+        '<span class="time">' + shortTime(a.ts) + '</span>' +
+        '<span class="who">' + esc(a.device || '') + '</span>' +
+        '<span class="what" title="' + esc(a.url || a.detail) + '">' + esc(a.host || '') +
+        (a.detail ? ' — ' + esc(a.detail) : '') + '</span></div>';
+    }).join('');
+  }
+
+  const evs = document.getElementById('kids-events');
+  if (!d.events || d.events.length === 0) {
+    evs.innerHTML = '<div class="kids-empty">' + (d.query ? 'No matches for “' + esc(d.query) + '”.' : 'No activity yet.') + '</div>';
+  } else {
+    evs.innerHTML = d.events.map(function(e) {
+      var label = e.host || e.url || '';
+      var status = e.action === 'block' ? 'blocked' : (e.status || '');
+      var cls = e.action === 'block' ? ' sev-high' : '';
+      return '<div class="kids-row">' +
+        '<span class="time">' + shortTime(e.ts) + '</span>' +
+        '<span class="who">' + esc(e.device || e.src_ip || '') + '</span>' +
+        '<span class="what" title="' + esc(e.url || '') + '">' + esc(label) + '</span>' +
+        (status !== '' ? '<span class="sev' + cls + '">' + esc(status) + '</span>' : '') + '</div>';
+    }).join('');
+  }
+
+  const rules = document.getElementById('kids-rules');
+  if (!d.rules || d.rules.length === 0) {
+    rules.innerHTML = '<div class="kids-empty">No dashboard rules. Domains in the config blocklist still apply.</div>';
+  } else {
+    rules.innerHTML = d.rules.map(function(r) {
+      return '<div class="kids-rule">' +
+        '<span class="tag tag-' + esc(r.action) + '">' + esc(r.action) + '</span>' +
+        '<span class="val">' + esc(r.value) + (r.note ? ' <span style="color:var(--text-dim)">(' + esc(r.note) + ')</span>' : '') + '</span>' +
+        '<button class="btn" onclick="removeKidsRule(' + Number(r.id) + ')">Remove</button></div>';
+    }).join('');
+  }
+}
+
+function postKids(payload) {
+  fetch(API, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  })
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(data) {
+      showToast(data.message || 'Done');
+      setTimeout(fetchAll, 1500);
+    })
+    .catch(function(err) {
+      if (err.message !== 'auth') showToast('Error: ' + err.message);
+    });
+}
+
+function pauseKids() {
+  var sel = document.getElementById('kids-pause-mins');
+  postKids({action: 'kids_pause', minutes: Number(sel ? sel.value : 30)});
+}
+
+function addKidsRule() {
+  var input = document.getElementById('kids-domain');
+  var kind = document.getElementById('kids-rule-kind');
+  var domain = (input.value || '').trim();
+  if (!domain) { showToast('Enter a domain'); return; }
+  postKids({action: 'kids_rule', kind: kind.value, domain: domain});
+  input.value = '';
+}
+
+function removeKidsRule(id) {
+  postKids({action: 'kids_rule_rm', id: id});
+}
+
+function searchKids() {
+  var q = (document.getElementById('kids-search').value || '').replace(/[^A-Za-z0-9._-]/g, '');
+  kidsQuery = q;
+  fetchKids(q);
+}
+
+function clearKidsSearch() {
+  kidsQuery = '';
+  document.getElementById('kids-search').value = '';
+  fetchKids('');
+}
+
+function fetchKids(q) {
+  var url = API + '?section=kids' + (q ? '&q=' + encodeURIComponent(q) : '');
+  fetch(url)
+    .then(function(r) {
+      if (handleAuthError(r)) throw new Error('auth');
+      return r.json();
+    })
+    .then(function(d) { renderKids(d); })
+    .catch(function(err) {
+      if (err.message !== 'auth') showToast('Error: ' + err.message);
+    });
+}
+
 function switchVpnServer(serverId) {
   const btns = document.querySelectorAll('.btn');
   btns.forEach(function(b) { b.disabled = true; });
@@ -937,6 +1209,7 @@ function fetchAll() {
       if (data.adblock) renderAdblock(data.adblock);
       if (data.dns)     renderDns(data.dns);
       if (data.vpn)     renderVpn(data.vpn);
+      if (data.kids)    { if (kidsQuery) { /* keep the filtered view */ } else renderKids(data.kids); }
     })
     .catch(function(err) {
       if (err.message !== 'auth') console.error('Fetch error:', err);

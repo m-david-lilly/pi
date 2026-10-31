@@ -309,6 +309,7 @@ get_all() {
 	adb=$(get_adblock_raw)
 	dns=$(get_dns_raw)
 	vpn=$(get_vpn_raw)
+	kids=$(kids_json_raw)
 	cat <<-EOF
 	{
 		"system": $sys,
@@ -316,7 +317,8 @@ get_all() {
 		"mwan3": $mwan,
 		"adblock": $adb,
 		"dns": $dns,
-		"vpn": $vpn
+		"vpn": $vpn,
+		"kids": $kids
 	}
 	EOF
 }
@@ -456,6 +458,50 @@ get_vpn_raw() {
 	vpn_json_raw
 }
 
+get_kids() {
+	send_json
+	kids_json_raw
+}
+
+# One JSON object for the Kids panel: toggle state plus a small window of the
+# proxy's own log, so the dashboard never parses shell output.
+kids_json_raw() {
+	status_raw=$(/usr/bin/kids-toggle.sh status 2>/dev/null)
+	enabled=$(echo "$status_raw" | sed -n 's/^enabled=//p')
+	proxy=$(echo "$status_raw" | sed -n 's/^proxy=//p')
+	nft=$(echo "$status_raw" | sed -n 's/^nft=//p')
+	pause_until=$(echo "$status_raw" | sed -n 's/^pause_until=//p')
+	ssid=$(uci -q get wireless.kids.ssid 2>/dev/null | tr -d '"\\')
+
+	stats=$(/usr/bin/kidproxy stats 2>/dev/null)
+	[ -z "$stats" ] && stats='{}'
+	alerts=$(/usr/bin/kidproxy query --kind alerts --limit 10 2>/dev/null)
+	[ -z "$alerts" ] && alerts='[]'
+	if [ -n "${KIDS_Q:-}" ]; then
+		events=$(/usr/bin/kidproxy query --kind events --limit 25 --q "$KIDS_Q" 2>/dev/null)
+	else
+		events=$(/usr/bin/kidproxy query --kind events --limit 25 2>/dev/null)
+	fi
+	[ -z "$events" ] && events='[]'
+	rules=$(/usr/bin/kidproxy query --kind rules --limit 50 2>/dev/null)
+	[ -z "$rules" ] && rules='[]'
+
+	cat <<-EOF
+	{
+		"enabled": ${enabled:-0},
+		"proxy": "${proxy:-stopped}",
+		"nft": "${nft:-absent}",
+		"pause_until": ${pause_until:-0},
+		"ssid": "${ssid:-}",
+		"query": "${KIDS_Q:-}",
+		"stats": $stats,
+		"alerts": $alerts,
+		"events": $events,
+		"rules": $rules
+	}
+	EOF
+}
+
 # ── POST handlers ───────────────────────────────────────────────────
 
 handle_post_with_data() {
@@ -555,6 +601,65 @@ handle_post_with_data() {
 				echo '{"ok":true,"message":"WAN weight update started"}'
 			else
 				echo '{"ok":false,"message":"wan-weight.sh not found"}'
+			fi
+			;;
+		kids_on)
+			send_json
+			if [ -x /usr/bin/kids-toggle.sh ]; then
+				/usr/bin/kids-toggle.sh on >/dev/null 2>&1 &
+				echo '{"ok":true,"message":"Kids network turning on"}'
+			else
+				echo '{"ok":false,"message":"kids-toggle.sh not found"}'
+			fi
+			;;
+		kids_off)
+			send_json
+			if [ -x /usr/bin/kids-toggle.sh ]; then
+				/usr/bin/kids-toggle.sh off >/dev/null 2>&1 &
+				echo '{"ok":true,"message":"Kids network turning off"}'
+			else
+				echo '{"ok":false,"message":"kids-toggle.sh not found"}'
+			fi
+			;;
+		kids_pause)
+			send_json
+			minutes=$(echo "$POSTDATA" | jsonfilter -e '@.minutes' 2>/dev/null)
+			case "$minutes" in ''|*[!0-9]*) minutes=30 ;; esac
+			if [ "$minutes" -lt 1 ] || [ "$minutes" -gt 720 ]; then
+				echo '{"ok":false,"message":"minutes must be 1-720"}'
+				break
+			fi
+			/usr/bin/kids-toggle.sh pause "$minutes" >/dev/null 2>&1
+			echo "{\"ok\":true,\"message\":\"Filtering paused for $minutes min\"}"
+			;;
+		kids_resume)
+			send_json
+			/usr/bin/kids-toggle.sh resume >/dev/null 2>&1
+			echo '{"ok":true,"message":"Filtering resumed"}'
+			;;
+		kids_rule)
+			send_json
+			kind=$(echo "$POSTDATA" | jsonfilter -e '@.kind' 2>/dev/null)
+			domain=$(echo "$POSTDATA" | jsonfilter -e '@.domain' 2>/dev/null)
+			case "$kind" in block|allow) ;; *) echo '{"ok":false,"message":"kind must be block or allow"}'; break ;; esac
+			if ! echo "$domain" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$'; then
+				echo '{"ok":false,"message":"invalid domain"}'
+				break
+			fi
+			if /usr/bin/kidproxy rule add --action "$kind" --value "$domain" >/dev/null 2>&1; then
+				echo "{\"ok\":true,\"message\":\"$domain $kind\"}"
+			else
+				echo '{"ok":false,"message":"could not add rule"}'
+			fi
+			;;
+		kids_rule_rm)
+			send_json
+			rid=$(echo "$POSTDATA" | jsonfilter -e '@.id' 2>/dev/null)
+			case "$rid" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid id"}'; break ;; esac
+			if /usr/bin/kidproxy rule rm --id "$rid" >/dev/null 2>&1; then
+				echo '{"ok":true,"message":"rule removed"}'
+			else
+				echo '{"ok":false,"message":"could not remove rule"}'
 			fi
 			;;
 		check_updates)
@@ -750,6 +855,7 @@ case "$REQUEST_METHOD" in
 	GET)
 		check_auth
 		section=$(echo "$QUERY_STRING" | sed -n 's/.*section=\([a-z0-9]*\).*/\1/p')
+		kids_q=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]q=\([A-Za-z0-9._-]*\).*/\1/p')
 		case "$section" in
 			system)  get_system ;;
 			wan)     get_wan ;;
@@ -757,6 +863,7 @@ case "$REQUEST_METHOD" in
 			adblock) get_adblock ;;
 			dns)     get_dns ;;
 			vpn)     get_vpn ;;
+			kids)    KIDS_Q="$kids_q"; get_kids ;;
 			updates) get_updates ;;
 			all)     get_all ;;
 			*)       send_error ;;

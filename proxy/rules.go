@@ -15,6 +15,7 @@ type Rules struct {
 	db      *sql.DB
 	mu      sync.RWMutex
 	hosts   map[string]string // host -> note
+	allow   []string          // patterns that override the blocklist
 	keyword []string
 }
 
@@ -36,12 +37,17 @@ func (r *Rules) reload() {
 	for _, d := range r.cfg.Block.Domains {
 		hosts[strings.ToLower(strings.TrimSpace(d))] = "config"
 	}
+	var allow []string
 	if r.db != nil {
-		rows, err := r.db.Query(`SELECT value, COALESCE(note,'') FROM rules WHERE kind='domain' AND action='block'`)
+		rows, err := r.db.Query(`SELECT value, COALESCE(note,''), action FROM rules WHERE kind='domain'`)
 		if err == nil {
 			for rows.Next() {
-				var v, note string
-				if rows.Scan(&v, &note) == nil {
+				var v, note, action string
+				if rows.Scan(&v, &note, &action) == nil {
+					if action == "allow" {
+						allow = append(allow, strings.ToLower(strings.TrimSpace(v)))
+						continue
+					}
 					hosts[strings.ToLower(v)] = note
 				}
 			}
@@ -56,15 +62,22 @@ func (r *Rules) reload() {
 	}
 	r.mu.Lock()
 	r.hosts = hosts
+	r.allow = allow
 	r.keyword = kws
 	r.mu.Unlock()
 }
 
 // blocked reports whether a hostname is on the blocklist, with a human note.
+// An allow rule for the same host wins over both the config list and the DB.
 func (r *Rules) blocked(host string) (bool, string) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	for _, pat := range r.allow {
+		if hostMatches(host, pat) {
+			return false, ""
+		}
+	}
 	for pat, note := range r.hosts {
 		if hostMatches(host, pat) {
 			return true, note

@@ -28,6 +28,12 @@ func main() {
 		caCmd(os.Args[2:])
 	case "query":
 		queryCmd(os.Args[2:])
+	case "stats":
+		statsCmd(os.Args[2:])
+	case "rule":
+		ruleCmd(os.Args[2:])
+	case "alerts":
+		alertsCmd(os.Args[2:])
 	case "notify-test":
 		notifyTestCmd(os.Args[2:])
 	case "version", "-v", "--version":
@@ -46,7 +52,10 @@ func usage() {
   kidproxy ca show [--cert /etc/kidproxy/ca.crt]
   kidproxy ca mobileconfig [--cert ...] [--out file]
   kidproxy notify-test [--config /etc/kidproxy/config.yaml]
-  kidproxy query [--kind events] [--since 24h] [--host x] [--q text] [--limit 100]`)
+  kidproxy query [--kind events] [--since 24h] [--host x] [--q text] [--limit 100]
+  kidproxy stats [--since 24h]
+  kidproxy rule add|rm|list [--action block|allow] [--value domain]
+  kidproxy alerts clear [--kind tls-pin]`)
 	os.Exit(2)
 }
 

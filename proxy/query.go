@@ -101,7 +101,7 @@ func queryCmd(args []string) {
 			WHERE ts>=? GROUP BY device ORDER BY last_ts DESC LIMIT ?`
 		params = []any{cutoff, *limit}
 	case "rules":
-		sqlStr = `SELECT id,kind,value,action,COALESCE(note,''),added_ts FROM rules ORDER BY id DESC LIMIT ?`
+		sqlStr = `SELECT id,kind,value,action,COALESCE(note,'') AS note,added_ts FROM rules ORDER BY id DESC LIMIT ?`
 		params = []any{*limit}
 	default:
 		sqlStr = `SELECT ts,device,src_ip,method,scheme,host,url,status,mime,req_bytes,resp_bytes,snippet,action,reason

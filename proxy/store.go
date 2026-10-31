@@ -100,6 +100,8 @@ type Store struct {
 	leases    map[string]string // ip -> mac
 	leaseMu   sync.Mutex
 	leaseAt   time.Time
+	alertMu   sync.Mutex
+	alertSeen map[string]time.Time
 	stop      chan struct{}
 	closeOnce sync.Once
 }
@@ -119,12 +121,13 @@ func openStore(cfg *Config) (*Store, error) {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
 	s := &Store{
-		db:     db,
-		cfg:    cfg,
-		ch:     make(chan *Event, 2048),
-		alerts: make(chan *Alert, 256),
-		leases: map[string]string{},
-		stop:   make(chan struct{}),
+		db:        db,
+		cfg:       cfg,
+		ch:        make(chan *Event, 2048),
+		alerts:    make(chan *Alert, 256),
+		leases:    map[string]string{},
+		alertSeen: map[string]time.Time{},
+		stop:      make(chan struct{}),
 	}
 	s.rules = newRules(cfg, db)
 	go s.writer()
@@ -202,6 +205,11 @@ func (s *Store) writeEvent(ev *Event) error {
 
 	for _, a := range s.evaluate(ev, evID, first) {
 		a.Device = ev.Device
+		// A pinned app can fail every single request; one alert per hour per
+		// (kind, host, device) is enough for a parent to notice.
+		if !s.allowAlert(a.Kind+"|"+a.Host+"|"+a.Device, a.TS) {
+			continue
+		}
 		if _, err := s.db.Exec(`INSERT INTO alerts (ts,severity,kind,device,host,url,detail)
 			VALUES (?,?,?,?,?,?,?)`,
 			a.TS.Unix(), a.Severity, a.Kind, a.Device, a.Host, a.URL, a.Detail); err != nil {
@@ -213,6 +221,23 @@ func (s *Store) writeEvent(ev *Event) error {
 		}
 	}
 	return nil
+}
+
+// allowAlert suppresses repeat alerts for the same key within an hour.
+func (s *Store) allowAlert(key string, ts time.Time) bool {
+	s.alertMu.Lock()
+	defer s.alertMu.Unlock()
+	if s.alertSeen == nil {
+		s.alertSeen = map[string]time.Time{}
+	}
+	if last, ok := s.alertSeen[key]; ok && ts.Sub(last) < time.Hour {
+		return false
+	}
+	if len(s.alertSeen) > 5000 {
+		s.alertSeen = map[string]time.Time{}
+	}
+	s.alertSeen[key] = ts
+	return true
 }
 
 func (s *Store) prune() {

@@ -27,6 +27,12 @@ DNS filtering, and capacity-based weighting are live; the VPN is staged but off.
   security headers). Per-WAN toggle switches, VPN server selection, adblock
   controls, package update management with selective install, reboot, and
   change password. HTTPS with a local CA certificate.
+- **Optional kids network** (off by default) — a separate `Home-Kids` SSID whose
+  web traffic is forced through a TLS-intercepting proxy (`kidproxy`) with its own
+  signing CA: full-URL + page-text + YouTube-metadata logging, domain
+  block/allow rules, keyword/self-harm/late-night alerts by email, and a Kids
+  panel in the dashboard. The adult LAN is untouched.
+  See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md).
 
 ## Topology
 
@@ -63,6 +69,7 @@ Full step-by-step build guide: [`docs/runbooks/setup.md`](docs/runbooks/setup.md
 | [`docs/reference/hardware.md`](docs/reference/hardware.md) | Bill of materials, NIC selection, throughput, packages |
 | [`docs/reference/load-balancing.md`](docs/reference/load-balancing.md) | mwan3 config + the speed-test healthcheck |
 | [`docs/reference/vpn.md`](docs/reference/vpn.md) | Surfshark WireGuard + pbr split-tunnel design |
+| [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md) | Optional kids WiFi: TLS interception, CA, logging, alerts, limits |
 | [`docs/planning/requirements.md`](docs/planning/requirements.md) | Functional / non-functional requirements (as-built) |
 | [`docs/runbooks/setup.md`](docs/runbooks/setup.md) | End-to-end build runbook |
 | [`scripts/README.md`](scripts/README.md) | Operational scripts: install + status |
@@ -75,7 +82,8 @@ Full step-by-step build guide: [`docs/runbooks/setup.md`](docs/runbooks/setup.md
 
 ```
 config/      Live UCI config pulled from the router + the hotplug NIC-rename rule
-scripts/     bringup.sh (one-shot rebuild), wan-weight.sh (capacity weighting), VPN scripts
+scripts/     bringup.sh (one-shot rebuild), wan-weight.sh (capacity weighting), VPN + kids scripts
+proxy/       kidproxy: the Go TLS-intercepting filter for the kids network
 www/         admin.html (dashboard UI) + cgi-bin/admin (CGI backend)
 docs/        reference/ · planning/ · runbooks/
 ```
