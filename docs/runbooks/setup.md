@@ -1595,6 +1595,8 @@ common Surfshark city codes; unknown codes fall back to a generated label.
 | Reload firewall after config change | `fw4 reload` |
 | Check active nftables port-forward rules | `nft list ruleset \| grep 32400` |
 | Tailscale peers / advertised routes | `tailscale status` / `tailscale debug prefs` |
+| Kids bedtimes / limits / services now | `kids-schedule.sh status` |
+| Kids usage history (today, raw) | `cat /tmp/kids-stats/$(date +%Y%m%d).tsv` — or the dashboard's **Kids analytics** page (Phase 13) |
 | Plex: is a client local or relayed? | `curl -s http://10.0.0.4:32400/status/sessions \| grep -o 'local="[01]" relayed="[01]"'` |
 | Plex: did plex.tv reject the connection list? | grep the PMS log for `403 response from PUT https://servers.plex.tv/devices` (see Phase 12.7) |
 
@@ -1902,3 +1904,153 @@ Expect `Request: [10.0.0.4:… (Allowed Network (Subnet))]` — **not** `(WAN)`.
 
 > **Trade-off:** with this route in place, remote local-quality Plex depends on the Plex
 > host being powered on and connected to the tailnet — it is the subnet router.
+
+---
+
+## Phase 13 — Kids analytics page
+
+A read-only page in the admin dashboard that shows how much time each kid spends on
+video, social media and games per day, broken down by service (YouTube, Netflix,
+TikTok, Roblox, …), by hour of the day and by day of the week, with a CSV export of
+the raw numbers for offline analysis.
+
+The numbers come from the same per-minute metering that enforces the daily time limits
+(`kids-schedule.sh`, see [`docs/reference/kids-schedules.md`](../reference/kids-schedules.md)).
+Nothing is decrypted and no URLs or page content are stored: the router counts minutes
+in which a kid device had real traffic to a service's servers, which it learns from the
+Pi's own DNS answers.
+
+### 13.1 — Prerequisites
+
+- The **kids network** is up (`Home-Kids` SSID on `br-kids`, `192.168.30.0/24`) and the
+  kids' devices use it. Only devices on that network are measured.
+- **Bedtimes & time limits are installed** — the scheduler is what records usage:
+  `kids-schedule.sh install` (or **Enable schedules** in the dashboard's
+  *Bedtimes & Time Limits* card) seeds the default categories and services, adds the
+  every-minute cron job and creates the nft sets and dnsmasq hooks.
+- The **router timezone** is set (as built: `America/Phoenix`, `MST7`); days and hours
+  on the page are router local time.
+- Each kid's devices are **assigned to the kid** in the *Bedtimes & Time Limits* card.
+  Set each kid device's private WiFi address for `Home-Kids` to **Fixed**, or a
+  rotating MAC shows up as a new, unassigned device.
+
+### 13.2 — Deploy
+
+From the repo root on your workstation:
+
+```bash
+scp -O scripts/kids-schedule.sh root@192.168.1.1:/usr/bin/kids-schedule.sh
+scp -O www/cgi-bin/admin root@192.168.1.1:/www/cgi-bin/admin
+scp -O www/admin.html root@192.168.1.1:/www/admin.html
+scp -O www/analytics.html root@192.168.1.1:/www/analytics.html
+ssh root@192.168.1.1 "chmod 755 /usr/bin/kids-schedule.sh /www/cgi-bin/admin && \
+  chmod 644 /www/analytics.html && kids-schedule.sh install"
+```
+
+`install` is idempotent. On a config that still has the older category-level domain
+lists, it migrates them to per-service lists (20 services in Video, Social media and
+Games) and restarts dnsmasq once.
+
+Then pull the generated config back into the repo — **without the kid sections**
+(names and device MACs stay on the Pi only):
+
+```bash
+scp -O root@192.168.1.1:/etc/config/dhcp config/etc-config/dhcp
+# kids_schedule: copy only the category/service sections into
+# config/etc-config/kids_schedule (keep its header comment; drop `config kid` blocks)
+```
+
+### 13.3 — Verify
+
+1. Open `https://192.168.1.1/admin.html`, sign in, and click **Kids analytics** in the
+   header (or go straight to `https://192.168.1.1/analytics.html`; without a session
+   it sends you to the admin login).
+2. The page loads with the filters, four summary tiles and the charts. A fresh install
+   shows "No recorded use … yet" until kids' devices use a measured service.
+3. On the Pi, confirm the scheduler is recording:
+
+   ```bash
+   crontab -l | grep kids-schedule                 # * * * * * /usr/bin/kids-schedule.sh apply
+   kids-schedule.sh status | grep -c '^service'    # 20 (or however many you configured)
+   cat /tmp/kids-stats/$(date +%Y%m%d).tsv         # grows as kids use measured services
+   ```
+4. **Download CSV** saves `kids-usage-<date>-<N>d.csv`; it opens in Excel/Sheets with a
+   header row.
+
+### 13.4 — Using the page
+
+| Control | What it does |
+|---|---|
+| **Kid** filter | All kids, one kid, or *Unassigned devices* (kids-network devices not assigned to anyone — check this for new or rotated-MAC devices) |
+| **7 / 14 / 30 / 90 days** | Range for every chart, tile and the CSV |
+| **Time per day** | Minutes per day stacked by category. **Click a colored segment, a legend entry or a table row** to drill into that category's services; **All categories** in the breadcrumb goes back |
+| Click a **day** (column) | The *Time of day* chart switches to that day's hours; click it again or *Show all days* to return |
+| **Time of day** | Minutes in each hour, summed over the range (or the selected day) |
+| **Day of week** | Average minutes per weekday over the range |
+| **Breakdown** table | Total, average per day, share and peak day per category/service — the text view of the charts |
+| Hover any column | Tooltip with the per-series minutes and the total |
+
+Colors follow the category or service (fixed config order), not its rank, so a service
+keeps its color across filters. Each category shows its first 7 services in config
+order and folds the rest into *Other*.
+
+### 13.5 — CSV export (raw data)
+
+**Download CSV** calls `GET /cgi-bin/admin?section=statscsv&days=N` (requires a
+dashboard session). Columns:
+
+```
+date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes
+2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",service,"Video","YouTube",38
+2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",category,"Video","",41
+```
+
+- One row per **device × hour × service** (`type=service`) and per **device × hour ×
+  category** (`type=category`). Filter on `type` before summing, or you count twice.
+- `minutes` = active minutes in that hour (0–60).
+- `kid` is resolved from the **current** device assignments; unassigned devices read
+  `unassigned`. `device_name` is the DHCP hostname if the device has a current lease.
+- A category row counts a minute once even when several of its services were active,
+  so a category's minutes can be less than the sum of its services'.
+
+The page itself uses `GET /cgi-bin/admin?section=stats&days=N` (JSON: `days`, `kids`,
+`categories`, `services`, `devices`, and `rows` of
+`[dayIndex, hour, mac, "s"|"c", id, minutes]`).
+
+### 13.6 — Where the data lives
+
+| Path | What | Lifetime |
+|---|---|---|
+| `/tmp/kids-stats/YYYYMMDD.tsv` | Today's history (RAM), updated every minute | Finalized to flash and removed at midnight |
+| `/etc/kids-stats/YYYYMMDD.tsv` | History on flash, written at :29 and :59 each hour and at midnight | Kept 90 days (`HISTORY_DAYS` in `kids-schedule.sh`) |
+
+Each line is `HH mac s|c id minutes`. After a reboot the scheduler restores today's
+file from flash, so at most ~30 minutes of history can be lost. Expect a few KB to a
+few tens of KB per day on the overlay; check headroom with `df -h /overlay` (the
+overlay on this SD image is small — about 80 MB).
+
+To wipe history: `rm -f /etc/kids-stats/*.tsv /tmp/kids-stats/*.tsv`.
+
+### 13.7 — Accuracy and troubleshooting
+
+- **Approximate, to the minute.** A minute counts when a device moved at least the
+  category's `min_bytes` (Video 50 KB, others 20 KB) to that service's servers.
+  Players that buffer ahead can be under-counted a little; apps refreshing in the
+  background can add a few minutes.
+- **A kid's time is summed across their devices** (phone and tablet in the same
+  minute = 2 minutes).
+- **YouTube is measured on `googlevideo.com`** (video playback), not `youtube.com`,
+  which shares servers with Google Search/Gmail. Browsing YouTube without playing
+  videos barely registers.
+- **Encrypted DNS in a browser** (its own "secure DNS"/DoH setting) bypasses the Pi's
+  DNS, so that browser's traffic is not attributed. Turn it off in the kids' browsers.
+- **Games:** logins, lobbies and downloads are measured; live match traffic often goes
+  to game-server IPs that are never looked up by name, so play time is undercounted.
+
+| Symptom | Cause / fix |
+|---|---|
+| "No recorded use" for days that had use | Scheduler not running (`crontab -l`), or the devices are not on `Home-Kids`. Check `/tmp/kids-stats/` |
+| A kid's usage shows under *Unassigned devices* | Device not assigned, or its MAC changed (rotating private address). Assign it in *Bedtimes & Time Limits* and set its private address to Fixed |
+| Hours look shifted | Router timezone not set — see 13.1 |
+| A service never shows up | Its domain list may be incomplete. Add domains to the service in `/etc/config/kids_schedule`; the next `apply` rebuilds the sets and restarts dnsmasq |
+| Analytics page redirects to the admin page | No or expired session — sign in on the admin page first |
