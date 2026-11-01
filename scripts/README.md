@@ -31,7 +31,7 @@ and logged. Design + limits: [`../docs/reference/kids-filtering.md`](../docs/ref
 
 | Script | Installs to | Purpose |
 |---|---|---|
-| `kids-setup.sh` | *(run from the repo copy)* | Idempotent setup: binary, `msmtp`, CA + WiFi key, UCI (network/DHCP/wireless/firewall), services, cron. Does not touch WANs/mwan3/adult LAN. |
+| `kids-setup.sh` | *(run from the repo copy)* | Idempotent setup: binary, `msmtp`, CA (`--ca dir` installs an existing one, e.g. the Pi Home CA) + WiFi key, UCI (network/DHCP/wireless/firewall), services, cron. Does not touch WANs/mwan3/adult LAN. |
 | `kids-toggle.sh` | `/usr/bin/kids-toggle.sh` | `on` / `off` / `pause [mins]` / `resume` / `status` / `resume-if-due`. |
 | `kids-nft.sh` | `/usr/bin/kids-nft.sh` | `apply` / `flush` / `status` the standalone `inet kidproxy` nft table. |
 | `kids-watchdog.sh` | `/usr/bin/kids-watchdog.sh` | Cron `*/5`: restart a dead proxy, email if it stays down, expire pauses. |

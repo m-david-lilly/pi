@@ -2,8 +2,9 @@
 
 An **optional, isolated WiFi network** whose web traffic is decrypted, filtered,
 logged and alerted on, so a parent can see what a child is doing and be told when
-something looks like grooming or self-harm. The adult LAN is not affected: no
-proxy, no CA, no logging.
+something looks like grooming or self-harm. The adult LAN's traffic is not
+proxied, logged or intercepted; the only thing shared with it is the `Pi Home CA`
+that signs both the dashboard certificate and the kids' intercepted leaves.
 
 **Status:** deployed and verified on the Pi (OpenWrt 25.12.4, October 2026).
 SSID `Home-Kids` is up, DHCP hands out `192.168.30.100–199`, the proxy intercepts
@@ -20,11 +21,11 @@ not enough for this job:
 - `https://www.youtube.com/watch?v=…` is one hostname for every video;
 - DNS filtering cannot alert on *content* ("don't tell your parents").
 
-So the kids network gets its own **signing CA** and a **decrypting proxy**
-(`kidproxy`). The proxy terminates the device's TLS, reads the request, opens its
-own TLS connection to the real site, and returns a CA-signed certificate to the
-device. Everything the device sends is visible; everything it receives is
-filtered, logged, and scanned for alert keywords.
+So the kids network gets a **signing CA** (`Pi Home CA`, the router's own root)
+and a **decrypting proxy** (`kidproxy`). The proxy terminates the device's TLS,
+reads the request, opens its own TLS connection to the real site, and returns a
+CA-signed certificate to the device. Everything the device sends is visible;
+everything it receives is filtered, logged, and scanned for alert keywords.
 
 This is a **monitoring** tool, not a security boundary against a determined
 teenager with their own data plan. See [§10 Limits](#10-limits-and-known-gaps).
@@ -58,11 +59,16 @@ teenager with their own data plan. See [§10 Limits](#10-limits-and-known-gaps).
 | DHCP range | `192.168.30.100–199`, 12 h lease, options 3/6 → `192.168.30.1` |
 | Proxy listeners | transparent `:8080` · explicit CONNECT `127.0.0.1:3128` (loopback only) |
 | Firewall zone | `kids`: input REJECT, forward REJECT, masq 1; only DHCP/DNS/8080/ICMP allowed in |
-| CA | `Kids Filter CA`, ECDSA P-256, 10 y, leaf certs 7 d |
+| CA | **`Pi Home CA`** (RSA 4096, SHA-256, 10 y) — the same root that signs the dashboard cert; leaf certs are ECDSA P-256, 7 d |
 | Data | `/var/lib/kidproxy/events.db` (SQLite, WAL), retention 30 days |
 
-The **adult LAN (`br-lan`, `192.168.1.1/24`) is untouched** — it keeps the Pi Home
-CA for uhttpd only, and none of the kidproxy rules reference it.
+One root covers both jobs: `Pi Home CA` signs `https://192.168.1.1` (uhttpd) and
+the leaves the proxy mints for intercepted sites. Devices therefore trust the
+*same* CA for the dashboard and for filtering — no second root to install or
+rotate. The CA lives in `.claude/.secrets/ca/` (gitignored) and is copied to
+`/etc/kidproxy/`. **The adult LAN's traffic is untouched** — nothing in the
+kidproxy rules references `br-lan`, and the proxy refuses to dial private
+addresses (`denyPrivate`), so a kids device cannot reach the dashboard through it.
 
 ### Choosing a different access point
 
@@ -97,7 +103,8 @@ subnet.
 | `/usr/bin/kidproxy` | `proxy/` (built to `proxy/dist/kidproxy`) | The proxy: MITM, capture, rules, alerts, CLI |
 | `/etc/kidproxy/config.yaml` | `config/kidproxy/config.yaml` | Block/allow lists, keywords, capture limits, email |
 | `/etc/kidproxy/kids.nft` | `config/kidproxy/kids.nft` | Interception + isolation rules |
-| `/etc/kidproxy/ca.crt`, `ca.key` | *(not in repo)* | Signing CA; key is 0600, never committed |
+| `/etc/kidproxy/ca.crt`, `ca.key` | *(not in repo — copy from `.claude/.secrets/ca/`)* | Signing CA = `Pi Home CA`; cert 0644, key 0600 |
+| `/etc/kidproxy/ca.crt.bak`, `ca.key.bak` | *(not in repo)* | Previous signing CA (the generated `Kids Filter CA`), kept when the CA is replaced |
 | `/etc/kidproxy/wifi.key` | *(not in repo)* | `Home-Kids` passphrase |
 | `/etc/init.d/kidproxy` | `config/kidproxy/kidproxy.init` | procd service for the binary |
 | `/etc/init.d/kidproxy-nft` | `config/kidproxy/kidproxy-nft.init` | Loads `kids.nft` at boot |
@@ -115,7 +122,12 @@ Cron (installed by `kids-setup.sh`):
 
 `kids-setup.sh` is the idempotent installer: binaries, packages (`msmtp`), CA,
 WiFi key, UCI for network/DHCP/wireless/firewall, services, cron. It does not
-touch the WANs, mwan3, or the Pi Home CA.
+touch the WANs, mwan3, or uhttpd's certificate.
+
+The CA step is `--ca <dir>`: point it at a copy of `.claude/.secrets/ca/` and it
+installs that cert/key (keeping the previous pair as `*.bak`). Without `--ca` it
+generates a fresh `Kids Filter CA` **only if none exists** — after a re-flash,
+pass `--ca` or every device's trust breaks.
 
 ---
 
@@ -165,7 +177,8 @@ warning and the device is effectively offline (fail-closed). The install page at
   see §10.)
 - **iPhone/iPad**: open `/ca.mobileconfig`, then Settings → General → VPN & Device
   Management → install the profile, then General → About → Certificate Trust
-  Settings → enable full trust for `Kids Filter CA`.
+  Settings → enable full trust for `Pi Home CA` (the profile and page show the
+  CA's own name, so it always matches).
 - **Windows**: double-click `ca.crt` → Install Certificate → Local Machine →
   Trusted Root Certification Authorities.
 - **macOS**: Keychain Access → System → import `ca.crt` → Always Trust.
@@ -173,8 +186,11 @@ warning and the device is effectively offline (fail-closed). The install page at
   Certificates → Authorities.
 
 The CA private key is the skeleton key for every trusting device. It lives at
-`/etc/kidproxy/ca.key` (0600), is never committed, and should be backed up
-offline. Rotating it means re-installing the CA on every device.
+`/etc/kidproxy/ca.key` (0600) and is never committed. **It is the Pi Home CA key**,
+so it also signs the dashboard certificate — the copy on the router is the only
+online copy; keep the offline original in `.claude/.secrets/ca/` backed up and
+treat the router's filesystem as sensitive. Rotating it means re-issuing the
+uhttpd cert *and* re-installing the CA on every device.
 
 ---
 
@@ -335,8 +351,9 @@ To cut wear on a card you intend to keep:
 - **Throughput** is roughly 40–80 Mbps per device on the Pi 5 (TLS termination is
   CPU-bound and single-process). Fine for browsing and video; not a benchmark.
 - **The CA key is a skeleton key.** Anyone who reads `/etc/kidproxy/ca.key` can
-  impersonate any site to every trusting device. Keep it 0600, back it up offline,
-  never commit it.
+  impersonate any site to every trusting device *and* mint a valid dashboard
+  certificate (it is the Pi Home CA key). Keep it 0600, keep the offline copy in
+  `.claude/.secrets/ca/`, never commit it, and rotate both uses together if it leaks.
 - **`off`/`pause` are honour-system controls** on the router. A device with mobile
   data, a VPN profile, or its own hotspot is outside this design.
 - **Snapchat/Instagram/TikTok are not bypassed by default.** If they break, add
@@ -350,6 +367,7 @@ To cut wear on a card you intend to keep:
 |---|---|
 | Kids device shows `169.254.x` | DHCP did not complete. Check `logread \| grep dnsmasq` for `DHCPACK(br-kids)`; re-associate. This is usually transient during `wifi reload`. |
 | Every HTTPS page warns about the certificate | CA not installed (or not *trusted* on iOS). Open `http://192.168.30.1/`. |
+| Pages started warning right after a CA change | The signing CA was replaced, so devices still trust the old root. Re-install from `http://192.168.30.1/` (the page and profile name the current CA). |
 | Plain `http://` requests hang | Regression in transparent plain-HTTP handling — `bufio.Peek` buffers the request, so the proxy must replay it (`prefixConn`). Covered by `TestPlainHTTPReplaysPeekedBytes`. |
 | `curl -x 127.0.0.1:3128 http://…` → `405` | Expected: the explicit listener is CONNECT-only. Test plain HTTP through `:8080` instead. |
 | A site is blocked that should not be | Add an **allow** rule in the dashboard; it wins over the blocklist and applies within 60 s. |
@@ -375,15 +393,19 @@ kidproxy query --kind events --since 10m --limit 5
 
 1. Build the binary: `powershell -File scripts/build-kidproxy.ps1` (static
    `linux/arm64`, pure-Go SQLite — no packages needed at runtime).
-2. Copy `config/kidproxy/`, `scripts/kids-*.sh` and `proxy/dist/kidproxy` to the Pi.
-3. Run `scripts/kids-setup.sh --src /tmp/pi [--email you@example.com]`.
+2. Copy `config/kidproxy/`, `scripts/kids-*.sh`, `proxy/dist/kidproxy` **and the
+   CA pair** (`.claude/.secrets/ca/ca.crt` + `ca.key`) to the Pi.
+3. Run `scripts/kids-setup.sh --src /tmp/pi --ca /tmp/pi/ca [--email you@example.com]`.
+   `--ca` installs the Pi Home CA; omit it and a fresh `Kids Filter CA` is minted,
+   which no device trusts.
 4. If `br-kids` has no address, reboot once so netifd settles.
-5. Install `http://192.168.30.1/`'s CA on each device.
+5. Install `http://192.168.30.1/`'s CA on each device (it is `Pi Home CA`).
 6. Configure `/etc/msmtprc`, set `notify.email.enabled: true` and `to:`, then
    `kidproxy notify-test`.
 7. Verify: `kids-toggle.sh status`, the block page, a YouTube title in
    `kidproxy query --kind youtube`, and the dashboard Kids panel.
 
-`gofmt`, `go vet` and `go test ./...` (26 tests, including regressions for the
-plain-HTTP replay bug, CA leaf signing, allow-overrides-block, alert dedupe, and
+`gofmt`, `go vet` and `go test ./...` (34 tests, including regressions for the
+plain-HTTP replay bug, ECDSA **and RSA** CA leaf signing, CA cert/key mismatch,
+allow-overrides-block, alert dedupe, and
 the stats/rule helpers) must pass before deploying.

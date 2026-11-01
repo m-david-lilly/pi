@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,9 +23,13 @@ import (
 // CA mints leaf certificates for intercepted hostnames. The CA private key is
 // the skeleton key for every device that trusts it: keep it 0600 and back it up
 // offline, never in the repo.
+//
+// key is a crypto.Signer so the router can sign with either the CA it generates
+// (ECDSA P-256) or an existing RSA CA such as the Pi Home CA that already signs
+// the admin dashboard's certificate.
 type CA struct {
 	cert     *x509.Certificate
-	key      *ecdsa.PrivateKey
+	key      crypto.Signer
 	leafDays int
 
 	mu    sync.Mutex
@@ -59,20 +66,24 @@ func loadCA(certPath, keyPath string, leafDays int) (*CA, error) {
 	if kp == nil {
 		return nil, fmt.Errorf("%s is not a PEM key", keyPath)
 	}
-	var key *ecdsa.PrivateKey
+	var key crypto.Signer
 	switch kp.Type {
 	case "EC PRIVATE KEY":
 		key, err = x509.ParseECPrivateKey(kp.Bytes)
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(kp.Bytes)
 	case "PRIVATE KEY":
 		var k any
 		k, err = x509.ParsePKCS8PrivateKey(kp.Bytes)
 		if err == nil {
 			var ok bool
-			key, ok = k.(*ecdsa.PrivateKey)
+			key, ok = k.(crypto.Signer)
 			if !ok {
-				err = fmt.Errorf("CA key must be ECDSA")
+				err = fmt.Errorf("CA key type %T cannot sign", k)
 			}
 		}
+	default:
+		err = fmt.Errorf("%s: unsupported PEM key type %q", keyPath, kp.Type)
 	}
 	if err != nil {
 		return nil, err
@@ -80,7 +91,25 @@ func loadCA(certPath, keyPath string, leafDays int) (*CA, error) {
 	if !cert.IsCA {
 		return nil, fmt.Errorf("CA certificate is not a CA")
 	}
+	// A cert/key mismatch would fail every handshake at mint time with a
+	// confusing error, so reject it at load with a clear one.
+	if !publicKeysEqual(cert.PublicKey, key.Public()) {
+		return nil, fmt.Errorf("%s does not match the public key in %s", keyPath, certPath)
+	}
 	return &CA{cert: cert, key: key, leafDays: leafDays, cache: map[string]cachedLeaf{}}, nil
+}
+
+// publicKeysEqual compares two public keys by their PKIX encoding.
+func publicKeysEqual(a, b any) bool {
+	ab, err := x509.MarshalPKIXPublicKey(a)
+	if err != nil {
+		return false
+	}
+	bb, err := x509.MarshalPKIXPublicKey(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(ab, bb)
 }
 
 func (c *CA) leaf(host string) (*tls.Certificate, error) {
@@ -199,4 +228,13 @@ func readCACert(path string) (*x509.Certificate, error) {
 
 func (c *CA) fingerprint() string {
 	return fmt.Sprintf("%X", c.cert.SerialNumber)
+}
+
+// name is the CA's display name (its subject CN) for install instructions and
+// the iOS profile. Falls back to the generated CA's name when the CN is empty.
+func (c *CA) name() string {
+	if cn := strings.TrimSpace(c.cert.Subject.CommonName); cn != "" {
+		return cn
+	}
+	return "Kids Filter CA"
 }

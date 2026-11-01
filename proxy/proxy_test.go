@@ -2,13 +2,19 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/binary"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -455,6 +461,127 @@ func TestCALeafSignedByCA(t *testing.T) {
 	}
 	if len(ipParsed.IPAddresses) != 1 || ipParsed.IPAddresses[0].String() != "192.168.30.1" {
 		t.Errorf("ip SANs = %v", ipParsed.IPAddresses)
+	}
+}
+
+// TestBootstrapNamesTheLoadedCA: the install page and the iOS profile must show
+// the CA's own name, because the router can sign with the Pi Home CA (which
+// also signs the dashboard cert) instead of the generated "Kids Filter CA".
+func TestBootstrapNamesTheLoadedCA(t *testing.T) {
+	cert := &x509.Certificate{
+		SerialNumber: big.NewInt(0x541b3904),
+		Subject:      pkix.Name{CommonName: "Pi Home CA"},
+	}
+	ca := &CA{cert: cert}
+
+	page := bootstrapPage(ca)
+	if !strings.Contains(page, "<b>Pi Home CA</b>") {
+		t.Error("bootstrap page does not name the loaded CA")
+	}
+	if strings.Contains(page, "Kids Filter CA") {
+		t.Error("bootstrap page still says Kids Filter CA")
+	}
+	if strings.Contains(page, "%!") {
+		t.Error("bootstrap page has a formatting error")
+	}
+	if !strings.Contains(page, "<code>541B3904</code>") {
+		t.Error("bootstrap page does not show the CA serial")
+	}
+
+	mc := string(mobileconfig(ca))
+	if !strings.Contains(mc, "<string>Pi Home CA</string>") {
+		t.Error("mobileconfig does not name the loaded CA")
+	}
+	if strings.Contains(mc, "%!") {
+		t.Error("mobileconfig has a formatting error")
+	}
+}
+
+// TestCARSAKeySignsLeaf covers loading an existing RSA CA (the Pi Home CA that
+// also signs the dashboard cert) instead of the ECDSA CA initCA generates.
+func TestCARSAKeySignsLeaf(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		enc  func(*rsa.PrivateKey) ([]byte, error)
+	}{
+		{"pkcs1", func(k *rsa.PrivateKey) ([]byte, error) {
+			return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)}), nil
+		}},
+		{"pkcs8", func(k *rsa.PrivateKey) ([]byte, error) {
+			b, err := x509.MarshalPKCS8PrivateKey(k)
+			return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: b}), err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+			now := time.Now()
+			tmpl := &x509.Certificate{
+				SerialNumber:          big.NewInt(1),
+				Subject:               pkix.Name{CommonName: "Pi Home CA"},
+				NotBefore:             now.Add(-time.Hour),
+				NotAfter:              now.AddDate(10, 0, 0),
+				IsCA:                  true,
+				BasicConstraintsValid: true,
+				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+			if err != nil {
+				t.Fatalf("create CA cert: %v", err)
+			}
+			certPath := filepath.Join(dir, "ca.crt")
+			keyPath := filepath.Join(dir, "ca.key")
+			if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			kb, err := tc.enc(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keyPath, kb, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			ca, err := loadCA(certPath, keyPath, 7)
+			if err != nil {
+				t.Fatalf("loadCA: %v", err)
+			}
+			leaf, err := ca.leaf("example.com")
+			if err != nil {
+				t.Fatalf("leaf: %v", err)
+			}
+			parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+			if err != nil {
+				t.Fatalf("parse leaf: %v", err)
+			}
+			roots := x509.NewCertPool()
+			roots.AddCert(ca.cert)
+			if _, err := parsed.Verify(x509.VerifyOptions{DNSName: "example.com", Roots: roots}); err != nil {
+				t.Errorf("RSA-signed leaf does not verify: %v", err)
+			}
+			if got := parsed.Issuer.CommonName; got != "Pi Home CA" {
+				t.Errorf("leaf issuer = %q, want Pi Home CA", got)
+			}
+		})
+	}
+}
+
+// TestCALoadRejectsMismatchedKey: a CA key that does not match the cert must be
+// rejected at load, not fail every handshake later.
+func TestCALoadRejectsMismatchedKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := initCA(dir); err != nil {
+		t.Fatalf("initCA: %v", err)
+	}
+	other := t.TempDir()
+	if err := initCA(other); err != nil {
+		t.Fatalf("initCA: %v", err)
+	}
+	if _, err := loadCA(filepath.Join(dir, "ca.crt"), filepath.Join(other, "ca.key"), 7); err == nil {
+		t.Fatal("loadCA accepted a key that does not match the certificate")
 	}
 }
 

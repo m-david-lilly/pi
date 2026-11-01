@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -30,7 +31,7 @@ To make that work, this device has to trust the router's certificate authority.<
 <ol>
 <li>Tap <b>iPhone / iPad profile</b> above, then <b>Allow</b>, then close the warning.</li>
 <li>Open <b>Settings</b> → <b>Profile Downloaded</b> → <b>Install</b> (top right) → enter the passcode.</li>
-<li><b>Required:</b> Settings → General → About → <b>Certificate Trust Settings</b> → turn on <b>Kids Filter CA</b>.</li>
+<li><b>Required:</b> Settings → General → About → <b>Certificate Trust Settings</b> → turn on <b>%[1]s</b>.</li>
 </ol>
 
 <h2>Android</h2>
@@ -49,13 +50,20 @@ To make that work, this device has to trust the router's certificate authority.<
 <h2>macOS</h2>
 <ol>
 <li>Download the certificate and open it — Keychain Access installs it in <b>login</b>.</li>
-<li>Open Keychain Access → <b>System</b> → find <b>Kids Filter CA</b> → double-click → <b>Trust</b> → <b>Always Trust</b>.</li>
+<li>Open Keychain Access → <b>System</b> → find <b>%[1]s</b> → double-click → <b>Trust</b> → <b>Always Trust</b>.</li>
 </ol>
 
 <div class="note"><b>Apps that won't work:</b> some apps pin their certificates (Snapchat, TikTok, banking, games).
 They will show connection errors on this network. That is expected — ask a parent if an app needs to be allowed.</div>
-<p style="margin-top:2rem;color:#777;font-size:.85rem">Certificate fingerprint (serial): <code>%s</code></p>
+<p style="margin-top:2rem;color:#777;font-size:.85rem">Certificate fingerprint (serial): <code>%[2]s</code></p>
 </body></html>`
+
+// bootstrapPage renders the CA install instructions. The CA's own name is used
+// so the device's trust toggle matches what the user sees (the router may sign
+// with the Pi Home CA, not the "Kids Filter CA" this program generates).
+func bootstrapPage(ca *CA) string {
+	return fmt.Sprintf(bootstrapHTML, ca.name(), ca.fingerprint())
+}
 
 func (p *Proxy) serveBootstrap(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimSuffix(r.URL.Path, "/") {
@@ -72,7 +80,7 @@ func (p *Proxy) serveBootstrap(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		fmt.Fprintf(w, bootstrapHTML, p.ca.fingerprint())
+		_, _ = io.WriteString(w, bootstrapPage(p.ca))
 	}
 }
 
@@ -89,16 +97,16 @@ func mobileconfig(ca *CA) []byte {
   <array>
     <dict>
       <key>PayloadCertificateFileName</key><string>KidsFilterCA.crt</string>
-      <key>PayloadContent</key><data>%s</data>
+      <key>PayloadContent</key><data>%[1]s</data>
       <key>PayloadDescription</key><string>Lets the kids network inspect web traffic.</string>
-      <key>PayloadDisplayName</key><string>Kids Filter CA</string>
-      <key>PayloadIdentifier</key><string>lan.kids.ca.%s</string>
+      <key>PayloadDisplayName</key><string>%[2]s</string>
+      <key>PayloadIdentifier</key><string>lan.kids.ca.%[3]s</string>
       <key>PayloadType</key><string>com.apple.security.root</string>
       <key>PayloadUUID</key><string>7E1B2C44-0F1A-4C21-9A5E-3B7D0C1A2F01</string>
       <key>PayloadVersion</key><integer>1</integer>
     </dict>
   </array>
-  <key>PayloadDisplayName</key><string>Kids Filter CA</string>
+  <key>PayloadDisplayName</key><string>%[2]s</string>
   <key>PayloadIdentifier</key><string>lan.kids.profile</string>
   <key>PayloadOrganization</key><string>Home</string>
   <key>PayloadRemovalDisallowed</key><false/>
@@ -107,5 +115,5 @@ func mobileconfig(ca *CA) []byte {
   <key>PayloadVersion</key><integer>1</integer>
 </dict>
 </plist>
-`, b64, ca.fingerprint()))
+`, b64, ca.name(), ca.fingerprint()))
 }

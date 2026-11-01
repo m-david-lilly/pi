@@ -3,17 +3,21 @@
 #
 # Run ON the Pi, from the repo copy:
 #   SRC=/tmp/pi ./scripts/kids-setup.sh --email you@example.com
+#   SRC=/tmp/pi ./scripts/kids-setup.sh --ca /tmp/pi/ca   # install an existing CA
 #
-# Installs kidproxy + helpers, creates the CA and WiFi key if missing, applies
-# network/DHCP/firewall/wireless UCI, and enables the services and cron jobs.
-# Does NOT touch the adult LAN, the WANs, mwan3, or the existing Pi Home CA.
+# Installs kidproxy + helpers, installs the signing CA (--ca) or creates one if
+# missing, creates the WiFi key if missing, applies network/DHCP/firewall/wireless
+# UCI, and enables the services and cron jobs. Does NOT touch the adult LAN, the
+# WANs, mwan3, or uhttpd's certificate.
 set -u
 
 EMAIL=""
+CA_SRC=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--email) EMAIL="${2:-}"; shift 2 ;;
 	--src) SRC="${2:-}"; shift 2 ;;
+	--ca) CA_SRC="${2:-}"; shift 2 ;;
 	*) shift ;;
 	esac
 done
@@ -66,7 +70,21 @@ for pkg in msmtp; do
 done
 
 # ---- 3. CA + WiFi key ------------------------------------------------------
-if [ ! -f /etc/kidproxy/ca.key ]; then
+# An existing CA can be installed with --ca (e.g. the Pi Home CA from
+# .claude/.secrets/ca/), which is what the live router uses so one root covers
+# both the dashboard cert and interception. Without --ca a fresh "Kids Filter CA"
+# is generated the first time only.
+if [ -n "$CA_SRC" ] && [ -f "$CA_SRC/ca.crt" ] && [ -f "$CA_SRC/ca.key" ]; then
+	if [ -f /etc/kidproxy/ca.key ] && ! cmp -s "$CA_SRC/ca.key" /etc/kidproxy/ca.key; then
+		log "replacing the signing CA with $CA_SRC (old copy kept as *.bak)"
+		cp -p /etc/kidproxy/ca.crt /etc/kidproxy/ca.crt.bak 2>/dev/null
+		cp -p /etc/kidproxy/ca.key /etc/kidproxy/ca.key.bak 2>/dev/null
+		chmod 600 /etc/kidproxy/ca.key.bak 2>/dev/null
+	fi
+	put "$CA_SRC/ca.crt" /etc/kidproxy/ca.crt 0644
+	put "$CA_SRC/ca.key" /etc/kidproxy/ca.key 0600
+	log "signing CA installed from $CA_SRC"
+elif [ ! -f /etc/kidproxy/ca.key ]; then
 	log "creating Kids Filter CA"
 	/usr/bin/kidproxy ca init --dir /etc/kidproxy || die "CA init failed"
 else

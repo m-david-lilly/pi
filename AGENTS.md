@@ -49,8 +49,8 @@ reach the box, and what's left. **Read it before touching anything** — several
 | VPN | Surfshark WireGuard `wgvpn` + pbr — **DEFAULT-OFF**, real creds injected. Multiple servers loaded dynamically from `/etc/wireguard/servers/*.conf` |
 | Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (SHA-256 hashed credentials in `/etc/piadmin/credentials`). HTTPS via local CA cert. Features: system/WAN/mwan3/adblock/DNS/VPN panels, per-WAN toggle switches, package update management with selective install, reboot, change password. |
 | Streaming fix | HTTPS sticky timeout set to **4 hours** (14400s) in mwan3. Prevents streaming services (Netflix, etc.) from breaking when mwan3 assigns new connections to a different WAN mid-session. Per-source-IP stickiness — each device stays on the same WAN for all HTTPS traffic for 4 hours. |
-| TLS | Local CA ("Pi Home CA") → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). |
-| Kids network (optional) | `Home-Kids` SSID on the onboard 5 GHz radio → `br-kids` **192.168.30.0/24**, all 80/443 forced into `kidproxy` (transparent `:8080`, TLS-interception with its own **Kids Filter CA**), QUIC/DoT/VPN/SMTP/IPv6 blocked, nft table `inet kidproxy` (standalone, not fw4). Full-URL + page-text + YouTube metadata logged to `/var/lib/kidproxy/events.db`; alerts by email. Dashboard has a Kids panel. Off by default. See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md). |
+| TLS | Local CA ("Pi Home CA", RSA 4096) → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). **The same CA signs kidproxy's intercepted leaves**, so its key is also copied to `/etc/kidproxy/ca.key` on the router. |
+| Kids network (optional) | `Home-Kids` SSID on the onboard 5 GHz radio → `br-kids` **192.168.30.0/24**, all 80/443 forced into `kidproxy` (transparent `:8080`, TLS-interception signed by the **Pi Home CA** — the same root as the dashboard cert), QUIC/DoT/VPN/SMTP/IPv6 blocked, nft table `inet kidproxy` (standalone, not fw4). Full-URL + page-text + YouTube metadata logged to `/var/lib/kidproxy/events.db`; alerts by email. Dashboard has a Kids panel. Off by default. See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md). |
 | Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled** — except when the kids network is on. |
 
 > This topology is the **inverse** of the original design (which put WAN1 on the
@@ -275,12 +275,14 @@ docs/
 
 **Secrets:** `.claude/.secrets/` is gitignored — real keys/passwords live there,
 NEVER in tracked files. Tracked config uses placeholders (`<WG_PRIVATE_KEY>` etc.).
-The `.secrets/ca/` subdirectory holds the local CA key/cert for TLS.
+The `.secrets/ca/` subdirectory holds the local CA key/cert for TLS (`Pi Home CA`).
 The **kids** secrets live only on the Pi and are never tracked:
-`/etc/kidproxy/ca.key` (the Kids Filter CA signing key, 0600) and
-`/etc/kidproxy/wifi.key` (the `Home-Kids` passphrase, 0600). `proxy/dist/` (the
-built binary) is gitignored too — rebuild it with `scripts/build-kidproxy.ps1`.
-Always scan a diff for secrets before committing.
+`/etc/kidproxy/ca.key` (0600 — **a copy of the Pi Home CA key**, so it signs both
+the dashboard cert and intercepted leaves) and `/etc/kidproxy/wifi.key` (the
+`Home-Kids` passphrase, 0600). The CA key is the router's most sensitive file:
+`kidproxy ca show` prints the serial to confirm which root is loaded.
+`proxy/dist/` (the built binary) is gitignored too — rebuild it with
+`scripts/build-kidproxy.ps1`. Always scan a diff for secrets before committing.
 
 ---
 
@@ -295,10 +297,12 @@ to fire the hotplug NIC rename. Then: `mwan3 restart; /etc/init.d/adblock reload
 /usr/bin/wan-weight.sh`.
 
 The **kids network is separate and optional**: build the binary
-(`scripts/build-kidproxy.ps1`), copy `config/kidproxy/`, `scripts/kids-*.sh` and
-`proxy/dist/kidproxy` over, then run `scripts/kids-setup.sh --src /tmp/pi`. It
-creates the CA and WiFi key if missing, so a re-flash means **re-installing the CA
-on every device**. Full checklist: `docs/reference/kids-filtering.md` §12.
+(`scripts/build-kidproxy.ps1`), copy `config/kidproxy/`, `scripts/kids-*.sh`,
+`proxy/dist/kidproxy` **and the CA pair** (`.claude/.secrets/ca/ca.crt` + `ca.key`)
+over, then run `scripts/kids-setup.sh --src /tmp/pi --ca /tmp/pi/ca`. `--ca`
+installs the Pi Home CA; without it a fresh `Kids Filter CA` is minted and **no
+device trusts it** (a re-flash therefore means re-installing the CA on every
+device). Full checklist: `docs/reference/kids-filtering.md` §12.
 
 ---
 
@@ -310,7 +314,10 @@ on every device**. Full checklist: `docs/reference/kids-filtering.md` §12.
   (`mail.oursite.example`). Fill in a real SMTP account, set `to:` (or run
   `kids-setup.sh --email you@example.com`), then `kidproxy notify-test`.
 - **Kids network: CA is installed on no device yet.** Each device must trust
-  `Kids Filter CA` from `http://192.168.30.1/` before HTTPS works.
+  `Pi Home CA` from `http://192.168.30.1/` before HTTPS works. The CA was switched
+  from the generated `Kids Filter CA` to `Pi Home CA` on 2026-10-31 (old pair kept
+  on the Pi as `/etc/kidproxy/ca.{crt,key}.kids.bak`), so any device that trusted
+  the old root must re-install.
 - **Kids network: only one client has been exercised** (a Windows laptop on
   `Home-Kids`, MAC `94:18:65:61:63:e1`). Android/iOS behaviour — especially
   user-CA trust and app-level pinning — is documented but not verified on hardware.
