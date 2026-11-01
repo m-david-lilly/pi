@@ -50,7 +50,7 @@ reach the box, and what's left. **Read it before touching anything** — several
 | Admin dashboard | `www/admin.html` + `/www/cgi-bin/admin` (shell CGI). Session-based auth (SHA-256 hashed credentials in `/etc/piadmin/credentials`). HTTPS via local CA cert. Features: system/WAN/mwan3/adblock/DNS/VPN panels, per-WAN toggle switches, package update management with selective install, reboot, change password. |
 | Streaming fix | HTTPS sticky timeout set to **4 hours** (14400s) in mwan3. Prevents streaming services (Netflix, etc.) from breaking when mwan3 assigns new connections to a different WAN mid-session. Per-source-IP stickiness — each device stays on the same WAN for all HTTPS traffic for 4 hours. |
 | TLS | Local CA ("Pi Home CA", RSA 4096) → signed server cert for `192.168.1.1` / `openwrt.lan` / `pi.lan`, installed on uhttpd. CA key in `.claude/.secrets/ca/` (gitignored). **The same CA signs kidproxy's intercepted leaves**, so its key is also copied to `/etc/kidproxy/ca.key` on the router. |
-| Kids network (optional) | `Home-Kids` SSID on the onboard 5 GHz radio → `br-kids` **192.168.30.0/24**, all 80/443 forced into `kidproxy` (transparent `:8080`, TLS-interception signed by the **Pi Home CA** — the same root as the dashboard cert), QUIC/DoT/VPN/SMTP/IPv6 blocked, nft table `inet kidproxy` (standalone, not fw4). Full-URL + page-text + YouTube metadata logged to `/var/lib/kidproxy/events.db`; alerts by email. Dashboard has a Kids panel. Off by default. See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md). |
+| Kids network (optional) | `Home-Kids` SSID on the onboard 5 GHz radio → `br-kids` **192.168.30.0/24**, all 80/443 forced into `kidproxy` (transparent `:8080`, TLS-interception signed by the **Pi Home CA** — the same root as the dashboard cert), QUIC/DoT/VPN/SMTP/IPv6 blocked, nft table `inet kidproxy` (standalone, not fw4). Full-URL + page-text + YouTube metadata (title, channel, category, tags, description, views, family-safe) logged to `/var/lib/kidproxy/events.db`; alerts by email. Dashboard has a Kids panel; `analytics.html` has a YouTube content drill-down and the CSV includes full URLs + metadata. Off by default. See [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md). |
 | Downstream WiFi | NETGEAR Orbi **MR60** in NAT mode off the Pi LAN (its LAN = 10.0.0.0/24). The Pi's own radio is **disabled** — except when the kids network is on. |
 
 > This topology is the **inverse** of the original design (which put WAN1 on the
@@ -175,6 +175,36 @@ current password really rewrote the credentials. All 11 sites now `return` (the
 `break`s that remain in `scripts/*.sh` are inside `while` loops, which is fine).
 Guard against it with `Select-String -Path www/cgi-bin/admin -Pattern '\bbreak\b'`
 (want no hits) and `sh -n /www/cgi-bin/admin` on the Pi.
+
+### 15. YouTube metadata is ~1.4 MB into the watch page
+`ytInitialPlayerResponse` (category, tags, description, views, family-safe) sits near
+the end of a ~1.4 MB watch page, so the normal `max_body_bytes` (256 KiB) buffer
+captures nothing useful. `proxy/capture.go` defines `youtubeCaptureBytes` (4 MiB) and
+`wantsYouTubeMetadata(host, path)`; `proxy.go` raises the capture buffer only for
+`/watch`, `/shorts/`, `/live/`, `/embed/`, `/v/` and `/youtubei/v1/player`. The stored
+snippet is still cut to `snippet_bytes`. `TestParseYouTubeWatchPage` fails if the
+embedded-JSON brace scanner (`jsonObjectAt`) breaks on braces inside strings.
+
+### 16. `kidproxy export` TSV feeds an awk in the CGI — one line per video
+`section=statscsv` appends one `type=video` row per captured video by piping
+`kidproxy export --format tsv` into awk. The export flattens tabs/CR/LF inside values
+(`tsv()`) so a title can never split a row, and the awk sets `FS="\t"` **after** reading
+the space-separated `/tmp/kids-map` file (`FS=" "` in `BEGIN`, then back). Getting that
+order wrong made `device_name` blank; dropping `-F '\t'` made the title fields shift
+into the wrong columns. Verify with a quote-aware field count — plain `awk -F,` reports
+false 20-field rows because titles contain commas inside quotes.
+
+### 17. Deploying `www/cgi-bin/admin` by piping into `cat` adds a BOM
+`(Get-Content -Raw f) | ssh root@… 'cat > /www/cgi-bin/admin'` passes `sh -n` but the
+kernel then refuses to run it: `Exec format error`, because PowerShell writes a UTF-8
+BOM ahead of `#!`. Use `scp -O` (or strip the BOM). The pipe is still fine for
+`ssh 'sh -s'`, where the BOM only looks like a comment.
+
+### 18. The dashboard cookie over HTTPS is `sysauth_https`
+LuCI names the session cookie after the scheme. Driving `https://192.168.1.1/…` in a
+browser with a `/tmp/piadmin-sessions/<token>` value requires
+`document.cookie = "sysauth_https=<token>; path=/"`; plain `sysauth` is the HTTP one and
+gets you bounced to the login page.
 
 ---
 

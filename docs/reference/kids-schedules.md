@@ -87,11 +87,21 @@ no URLs, no content.
   services; click a day to see that day's hours; time-of-day and day-of-week
   charts; filter by kid (or *Unassigned devices*) and 7/14/30/90 days; a
   breakdown table that is also the accessible view of the charts.
+- **YouTube content** (third level): inside the **Video** category, click the
+  YouTube row (or its chart segment/legend) to see *what* was watched — content
+  categories (Music, Gaming, Education, …), top tags, and one row per video with a
+  watch link, channel, length, views and family-safe flag. Category and tag chips
+  filter the list; the kid/day/range filters still apply. Data comes from
+  `section=yt&days=N` (the proxy's captured video metadata, mapped from device MAC
+  to kid).
 - **Download CSV** on that page (`GET /cgi-bin/admin?section=statscsv&days=N`):
-  `date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes`,
-  one row per device/hour/service and per device/hour/category (`type` says which).
-  Kid names come from the current device assignments; unassigned devices say
-  `unassigned`. JSON for the page: `section=stats&days=N`.
+  `date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes,`
+  `url,video_id,title,channel,tags,duration_seconds,publish_date,view_count,family_safe`,
+  one row per device/hour/service and per device/hour/category (`type` says which),
+  plus one `type=video` row per captured YouTube video with its full watch URL and
+  metadata (tags as a JSON array in the quoted field; time rows leave those columns
+  empty). Kid names come from the current device assignments; unassigned devices
+  say `unassigned`. JSON for the page: `section=stats&days=N`.
 
 A kid's time is the sum over their devices (two devices in the same minute count
 twice). A category counts a minute once even when several of its services were
@@ -139,6 +149,11 @@ restarts dnsmasq (the sets refill as devices look names up again).
   device's private WiFi address for `Home-Kids` to **Fixed** (iOS: *Private Wi-Fi
   Address → Fixed*; Android: keep the per-network randomized MAC, not
   "non-persistent"). The card lists unassigned devices so new ones stand out.
+- **YouTube rows are "videos seen", not watch time.** A row means the watch page or
+  player response passed through the proxy; skipping after 10 s still counts. The
+  minutes in the charts stay the router's traffic measure. Metadata needs the page
+  to load through the proxy, so a TV app or embedded player can give title and
+  channel without a category or tags, and those videos show as `Unknown`.
 
 ## Time zone
 

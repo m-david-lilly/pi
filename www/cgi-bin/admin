@@ -644,6 +644,20 @@ get_stats() {
 	echo "{\"days\":[$dates],\"now\":\"$(date '+%Y%m%d %H')\",\"kids\":[$kids_json],\"categories\":[$cats],\"services\":[$svcs],\"devices\":[$devices],\"rows\":[$rows]}"
 }
 
+# YouTube metadata for the analytics drill-down: ?section=yt&days=N.
+# Returns {"days":N,"videos":[...]}; the browser maps each video's device MAC
+# to a kid with the list from section=stats.
+get_youtube() {
+	send_json
+	days=$(stats_days)
+	tz=$(uci -q get system.@system[0].zonename 2>/dev/null)
+	set -- --kind youtube --format json --since "${days}d"
+	[ -n "$tz" ] && set -- "$@" --tz "$tz"
+	videos=$(/usr/bin/kidproxy export "$@" 2>/dev/null)
+	[ -n "$videos" ] || videos='[]'
+	printf '{"days":%s,"videos":%s}\n' "$days" "$videos"
+}
+
 # Raw history as CSV for offline analysis (one row per device/hour/service or category).
 get_stats_csv() {
 	days=$(stats_days)
@@ -665,7 +679,7 @@ get_stats_csv() {
 		awk '{ print "D", tolower($2), $4 }' /tmp/dhcp.leases 2>/dev/null
 		$SCHED_SCRIPT status 2>/dev/null | awk '$1 == "service" { $1 = "S"; print } $1 == "category" { $1 = "C"; print }'
 	} > "$map"
-	echo "date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes"
+	echo "date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes,url,video_id,title,channel,tags,duration_seconds,publish_date,view_count,family_safe"
 	echo "$files" | while read -r idx d wd f; do
 		[ -f "$f" ] || continue
 		awk -v day="${d%????}-$(echo "$d" | cut -c5-6)-${d#??????}" -v wd="$wd" -v map="$map" '
@@ -684,9 +698,34 @@ get_stats_csv() {
 				h = ($2 in host) ? host[$2] : ""
 				if ($3 == "s") { t = "service"; c = clabel[scat[$4]]; s = ($4 in slabel) ? slabel[$4] : $4 }
 				else { t = "category"; c = ($4 in clabel) ? clabel[$4] : $4; s = "" }
-				printf "%s,%s,%d,%s,%s,%s,%s,%s,%s,%d\n", day, wd, $1, q(k), $2, q(h), t, q(c), q(s), $5
+				printf "%s,%s,%d,%s,%s,%s,%s,%s,%s,%d,,,,,,,,,\n", day, wd, $1, q(k), $2, q(h), t, q(c), q(s), $5
 			}' "$f"
 	done
+	# One extra row per video watched, with the metadata captured by the proxy.
+	# The TSV columns are: date weekday hour device video_id title channel
+	# category tags duration_seconds publish_date view_count family_safe url.
+	tz=$(uci -q get system.@system[0].zonename 2>/dev/null)
+	set -- --kind youtube --format tsv --since "${days}d"
+	[ -n "$tz" ] && set -- "$@" --tz "$tz"
+	/usr/bin/kidproxy export "$@" 2>/dev/null | awk -F '\t' -v map="$map" '
+		function q(s) { gsub(/"/, "\"\"", s); return "\"" s "\"" }
+		function rest(from,   i, s) { s = $from; for (i = from + 1; i <= NF; i++) s = s " " $i; return s }
+		BEGIN {
+			# The map is space-separated even though the export is tab-separated.
+			FS = " "
+			while ((getline < map) > 0) {
+				if ($1 == "K") kid[$2] = rest(3)
+				else if ($1 == "D") host[$2] = $3
+			}
+			FS = "\t"
+		}
+		NR > 1 {
+			mac = tolower($4)
+			k = (mac in kid) ? kid[mac] : "unassigned"
+			h = (mac in host) ? host[mac] : ""
+			printf "%s,%s,%d,%s,%s,%s,video,%s,YouTube,,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+				$1, $2, $3, q(k), q(mac), q(h), q($8), q($14), q($5), q($6), q($7), q($9), $10, $11, $12, $13
+		}'
 	rm -f "$map"
 }
 
@@ -1233,6 +1272,7 @@ case "$REQUEST_METHOD" in
 			schedule) get_schedule ;;
 			kidswifi) get_kidswifi ;;
 			stats)    get_stats ;;
+			yt)       get_youtube ;;
 			statscsv) get_stats_csv ;;
 			updates) get_updates ;;
 			all)     get_all ;;

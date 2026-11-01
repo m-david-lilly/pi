@@ -203,7 +203,7 @@ One SQLite database, `/var/lib/kidproxy/events.db`, WAL mode, pruned every 6 h t
 |---|---|
 | `events` | Every request: ts, src IP, device name (from dnsmasq leases), method, scheme, host, **full URL with query string**, status, MIME, bytes, action (`bump`/`block`/`tunnel`/`error`), reason, **text snippet** |
 | `searches` | Search-engine queries extracted from the URL (`q=`, `p=`, `query=`, …) |
-| `youtube` | Video id, **title**, channel, duration — parsed from watch URLs and from the InnerTube `player` JSON response, so titles appear without downloading video |
+| `youtube` | One row per video per device: id, **title**, channel + channel id, duration, **content category**, **tags**, description, publish date, view count, family-safe flag, thumbnail, canonical watch URL, live flag. Parsed from watch URLs, the InnerTube `player` JSON response and the watch page's embedded player/schema.org metadata, so it all appears without downloading video |
 | `alerts` | Rule matches and notable events (see §7) |
 | `rules` | Dashboard-added `block`/`allow` domains |
 | `devices` | IP → MAC → friendly name |
@@ -215,6 +215,20 @@ scanned; snippets are truncated to `snippet_bytes` (4 KiB). Media/CDN hosts
 not buffered through the proxy. The client always receives the full body
 regardless of what was inspected.
 
+YouTube watch pages and `/youtubei/v1/player` responses are the exception: they
+are buffered up to 4 MiB (`youtubeCaptureBytes`) because the player metadata sits
+near the end of a ~1.4 MB watch page. Only those paths get the larger buffer, and
+the stored snippet is still cut to `snippet_bytes`.
+
+YouTube metadata has three sources, tried in this order: the InnerTube `player`
+JSON (richest — category, tags, description, publish date, views, family-safe),
+the `ytInitialPlayerResponse` embedded in the watch page (same fields, no extra
+request), and finally the page's `itemprop`/OpenGraph meta tags (title, genre,
+keywords, duration, family-friendly). Video rows store the device **MAC** when
+the DHCP lease is known, so analytics can map a video to a kid; a later hit that
+carries only the video id never blanks metadata already learned
+(`ON CONFLICT ... DO UPDATE SET x = COALESCE(NULLIF(excluded.x,''), x)`).
+
 Read it with the CLI (JSON out, safe to run while the proxy writes):
 
 ```sh
@@ -222,11 +236,25 @@ kidproxy stats                                  # 24h counters + db size
 kidproxy query --kind events --since 24h --limit 50
 kidproxy query --kind events --q "roblox"       # substring on URL/snippet/title
 kidproxy query --kind alerts --since 7d
-kidproxy query --kind youtube --since 7d
+kidproxy query --kind youtube --since 7d      # rich metadata, tags as a JSON array
+kidproxy query --kind youtube --q "minecraft" # also matches category/tags/description
 kidproxy query --kind searches --since 7d
 kidproxy query --kind devices
 kidproxy query --kind rules
 ```
+
+`export` is the machine-readable form the dashboard uses (local date, weekday and
+hour come from `--tz`, defaulting to `alert.timezone`):
+
+```sh
+kidproxy export --kind youtube --format tsv  --since 14d --tz America/Phoenix
+kidproxy export --kind youtube --format json --since 14d --tz America/Phoenix
+```
+
+The TSV columns are `date weekday hour device video_id title channel category
+tags duration_seconds publish_date view_count family_safe url`; tabs and newlines
+inside values are flattened so one video is always one line. The JSON form is the
+same data plus `description`, `thumbnail`, `channel_id`, `live` and `query`.
 
 ---
 
@@ -312,6 +340,16 @@ Backed by `GET /cgi-bin/admin?section=kids[&q=text]` (also embedded in
 `section=all`) and the POST actions `kids_on`, `kids_off`, `kids_pause`,
 `kids_resume`, `kids_rule`, `kids_rule_rm`.
 
+**Kids Analytics** (`https://192.168.1.1/analytics.html`) is the time-and-content
+view: per-kid/per-day/per-hour minutes per category, and a third-level YouTube
+drill-down. In the **Video** category, the YouTube row (legend, table row or chart
+segment) opens **YouTube content** for the current kid/day/range: a content-category
+table (Music, Gaming, Education, …), the top tags, and one row per captured video
+with a watch link, channel, length, view count and family-safe flag. Category and
+tag chips filter the list. Backed by `GET /cgi-bin/admin?section=yt&days=N`
+(`kidproxy export --format json`); the browser maps each row's device MAC to a kid
+using the MACs from `section=stats`.
+
 ---
 
 ## 9. Disk, SD wear, and retention
@@ -348,6 +386,13 @@ To cut wear on a card you intend to keep:
   interception rules for IPv6.
 - **Hard-coded DoH** is handled by blocking the well-known resolvers, not by
   protocol inspection. A custom resolver IP in a custom app is a gap.
+- **YouTube metadata is what the client fetched.** Titles, categories and tags come
+  from the player response/watch page, so a video only appears once its page was
+  loaded through the proxy. The TV app and some embedded players load the player
+  response without a watch page — those still give title/channel/duration but can
+  miss category and tags. Age-restricted or removed videos return no metadata and
+  show as `Unknown`. Playback of the media itself is never proxied, so the
+  analytics "minutes" are router-measured traffic time, not YouTube watch time.
 - **Throughput** is roughly 40–80 Mbps per device on the Pi 5 (TLS termination is
   CPU-bound and single-process). Fine for browsing and video; not a benchmark.
 - **The CA key is a skeleton key.** Anyone who reads `/etc/kidproxy/ca.key` can

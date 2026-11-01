@@ -64,15 +64,20 @@ func queryCmd(args []string) {
 		sqlStr += ` ORDER BY ts DESC LIMIT ?`
 		params = append(params, *limit)
 	case "youtube":
-		sqlStr = `SELECT ts,device,video_id,title,channel,seconds,query,url FROM youtube WHERE ts>=?`
+		sqlStr = `SELECT ts,device,video_id,title,channel,channel_id,seconds,query,
+			COALESCE(NULLIF(watch_url,''), 'https://www.youtube.com/watch?v='||video_id) AS url,
+			category,tags,description,publish_date,view_count,family_safe,thumbnail,live
+			FROM youtube WHERE ts>=?`
 		params = []any{cutoff}
 		if *device != "" {
 			sqlStr += ` AND (device LIKE ? OR device=?)`
 			params = append(params, "%"+*device, *device)
 		}
 		if *q != "" {
-			sqlStr += ` AND (title LIKE ? OR channel LIKE ? OR query LIKE ?)`
-			params = append(params, "%"+*q+"%", "%"+*q+"%", "%"+*q+"%")
+			sqlStr += ` AND (title LIKE ? OR channel LIKE ? OR query LIKE ? OR category LIKE ? OR tags LIKE ? OR description LIKE ?)`
+			for i := 0; i < 6; i++ {
+				params = append(params, "%"+*q+"%")
+			}
 		}
 		sqlStr += ` ORDER BY ts DESC LIMIT ?`
 		params = append(params, *limit)
@@ -150,6 +155,21 @@ func queryCmd(args []string) {
 				if n, ok := v.(int64); ok {
 					m[c] = time.Unix(n, 0).Format(time.RFC3339)
 					continue
+				}
+			}
+			if *kind == "youtube" {
+				switch c {
+				case "tags":
+					if s, ok := v.(string); ok && s != "" {
+						var arr []string
+						if json.Unmarshal([]byte(s), &arr) == nil {
+							v = arr
+						}
+					}
+				case "family_safe", "live":
+					if n, ok := v.(int64); ok {
+						v = n != 0
+					}
 				}
 			}
 			m[c] = v

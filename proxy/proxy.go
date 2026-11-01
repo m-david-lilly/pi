@@ -411,7 +411,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, meta *connMeta, 
 	var buf *cappedBuffer
 	var dst io.Writer = w
 	if capture {
-		buf = newCapped(p.cfg.Capture.MaxBodyBytes)
+		maxBody := p.cfg.Capture.MaxBodyBytes
+		if wantsYouTubeMetadata(host, r.URL.Path) && maxBody < youtubeCaptureBytes {
+			maxBody = youtubeCaptureBytes
+		}
+		buf = newCapped(maxBody)
 		dst = io.MultiWriter(w, buf)
 	}
 	if f, ok := w.(http.Flusher); ok {

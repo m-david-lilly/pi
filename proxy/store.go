@@ -39,12 +39,25 @@ type Search struct {
 	Query  string `json:"query"`
 }
 
+// YouTube is the metadata we can learn without downloading the video. The
+// player response carries most of it; the watch page's meta tags and embedded
+// ytInitialPlayerResponse are the fallback when the player call was not seen.
 type YouTube struct {
-	VideoID string `json:"video_id"`
-	Title   string `json:"title"`
-	Channel string `json:"channel"`
-	Seconds int    `json:"seconds"`
-	Query   string `json:"query,omitempty"`
+	VideoID     string   `json:"video_id"`
+	Title       string   `json:"title"`
+	Channel     string   `json:"channel"`
+	ChannelID   string   `json:"channel_id,omitempty"`
+	Seconds     int      `json:"seconds"`
+	Category    string   `json:"category,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Description string   `json:"description,omitempty"`
+	PublishDate string   `json:"publish_date,omitempty"`
+	ViewCount   int64    `json:"view_count,omitempty"`
+	FamilySafe  *bool    `json:"family_safe,omitempty"`
+	Thumbnail   string   `json:"thumbnail,omitempty"`
+	Live        bool     `json:"live,omitempty"`
+	WatchURL    string   `json:"watch_url,omitempty"`
+	Query       string   `json:"query,omitempty"`
 }
 
 type Alert struct {
@@ -75,9 +88,13 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
 CREATE TABLE IF NOT EXISTS youtube (
   id INTEGER PRIMARY KEY, ts INTEGER, device TEXT, video_id TEXT,
-  title TEXT, channel TEXT, seconds INTEGER, query TEXT, url TEXT
+  title TEXT, channel TEXT, seconds INTEGER, query TEXT, url TEXT,
+  channel_id TEXT, category TEXT, tags TEXT, description TEXT,
+  publish_date TEXT, view_count INTEGER, family_safe INTEGER,
+  thumbnail TEXT, watch_url TEXT, live INTEGER DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_yt_video ON youtube(video_id, device);
+CREATE INDEX IF NOT EXISTS idx_yt_ts ON youtube(ts);
 CREATE TABLE IF NOT EXISTS searches (
   id INTEGER PRIMARY KEY, ts INTEGER, device TEXT, engine TEXT, query TEXT, url TEXT
 );
@@ -90,6 +107,61 @@ CREATE TABLE IF NOT EXISTS rules (
   added_ts INTEGER
 );
 `
+
+// youtubeAdded are the columns added after the first release. CREATE TABLE IF
+// NOT EXISTS never alters an existing table, so upgrades add them in place.
+var youtubeAdded = []struct{ name, ddl string }{
+	{"channel_id", "TEXT"},
+	{"category", "TEXT"},
+	{"tags", "TEXT"},
+	{"description", "TEXT"},
+	{"publish_date", "TEXT"},
+	{"view_count", "INTEGER"},
+	{"family_safe", "INTEGER"},
+	{"thumbnail", "TEXT"},
+	{"watch_url", "TEXT"},
+	{"live", "INTEGER DEFAULT 0"},
+}
+
+// migrate brings a database created by an older kidproxy up to the current
+// schema without losing the history parents have already collected.
+func migrate(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(youtube)`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[strings.ToLower(name)] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, c := range youtubeAdded {
+		if have[c.name] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE youtube ADD COLUMN ` + c.name + ` ` + c.ddl); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_yt_category ON youtube(category)`)
+	return err
+}
 
 type Store struct {
 	db        *sql.DB
@@ -119,6 +191,9 @@ func openStore(cfg *Config) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	s := &Store{
 		db:        db,
@@ -184,18 +259,60 @@ func (s *Store) writeEvent(ev *Event) error {
 
 	if ev.Video != nil && ev.Video.VideoID != "" {
 		// Most hits for a video carry only its ID (watch-page reloads, caption
-		// fetches); keep the title/channel/length learned from the player
-		// response instead of blanking them.
-		_, _ = s.db.Exec(`INSERT INTO youtube (ts,device,video_id,title,channel,seconds,query,url)
-			VALUES (?,?,?,?,?,?,?,?)
+		// fetches); keep the metadata learned from the player response or watch
+		// page instead of blanking it. The device is stored as the MAC when the
+		// lease is known so the analytics page can map it to a kid.
+		v := ev.Video
+		device := s.deviceMAC(ev.SrcIP)
+		if device == "" {
+			device = ev.Device
+		}
+		watch := v.WatchURL
+		if watch == "" {
+			watch = "https://www.youtube.com/watch?v=" + v.VideoID
+		}
+		tags := ""
+		if len(v.Tags) > 0 {
+			if b, err := json.Marshal(v.Tags); err == nil {
+				tags = string(b)
+			}
+		}
+		var family any
+		if v.FamilySafe != nil {
+			if *v.FamilySafe {
+				family = 1
+			} else {
+				family = 0
+			}
+		}
+		live := 0
+		if v.Live {
+			live = 1
+		}
+		_, _ = s.db.Exec(`INSERT INTO youtube
+			(ts,device,video_id,title,channel,seconds,query,url,channel_id,category,
+			 tags,description,publish_date,view_count,family_safe,thumbnail,watch_url,live)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(video_id,device) DO UPDATE SET
 			  title=COALESCE(NULLIF(excluded.title,''), title),
 			  channel=COALESCE(NULLIF(excluded.channel,''), channel),
+			  channel_id=COALESCE(NULLIF(excluded.channel_id,''), channel_id),
 			  seconds=CASE WHEN excluded.seconds > 0 THEN excluded.seconds ELSE seconds END,
+			  category=COALESCE(NULLIF(excluded.category,''), category),
+			  tags=COALESCE(NULLIF(excluded.tags,''), tags),
+			  description=COALESCE(NULLIF(excluded.description,''), description),
+			  publish_date=COALESCE(NULLIF(excluded.publish_date,''), publish_date),
+			  view_count=CASE WHEN excluded.view_count > 0 THEN excluded.view_count ELSE view_count END,
+			  family_safe=COALESCE(excluded.family_safe, family_safe),
+			  thumbnail=COALESCE(NULLIF(excluded.thumbnail,''), thumbnail),
+			  watch_url=COALESCE(NULLIF(excluded.watch_url,''), watch_url),
+			  live=CASE WHEN excluded.live > 0 THEN excluded.live ELSE live END,
 			  query=COALESCE(NULLIF(excluded.query,''), query),
+			  url=COALESCE(NULLIF(excluded.url,''), url),
 			  ts=excluded.ts`,
-			ts, ev.Device, ev.Video.VideoID, ev.Video.Title, ev.Video.Channel,
-			ev.Video.Seconds, ev.Video.Query, ev.URL)
+			ts, device, v.VideoID, v.Title, v.Channel, v.Seconds, v.Query, ev.URL,
+			v.ChannelID, v.Category, tags, truncate(v.Description, 4000), v.PublishDate,
+			v.ViewCount, family, v.Thumbnail, watch, live)
 	}
 
 	first := false
@@ -264,16 +381,22 @@ func (s *Store) prune() {
 	}
 }
 
-// deviceName resolves an IP to a friendly name using the dnsmasq lease file
-// and the MAC map in config. Cached for 20s so we do not stat /tmp per request.
-func (s *Store) deviceName(ip string) string {
+// leaseMap returns IP -> MAC, refreshed at most every 20s so we do not stat
+// /tmp on every request.
+func (s *Store) leaseMap() map[string]string {
 	s.leaseMu.Lock()
 	defer s.leaseMu.Unlock()
 	if time.Since(s.leaseAt) > 20*time.Second {
 		s.leases = readLeases()
 		s.leaseAt = time.Now()
 	}
-	mac := s.leases[ip]
+	return s.leases
+}
+
+// deviceName resolves an IP to a friendly name using the dnsmasq lease file
+// and the MAC map in config.
+func (s *Store) deviceName(ip string) string {
+	mac := s.leaseMap()[ip]
 	if mac == "" {
 		return ip
 	}
@@ -281,6 +404,13 @@ func (s *Store) deviceName(ip string) string {
 		return name
 	}
 	return mac
+}
+
+// deviceMAC returns the lease MAC for an IP, or "" when it is not known. The
+// analytics page keys kids by MAC, so video rows use this rather than the
+// friendly name.
+func (s *Store) deviceMAC(ip string) string {
+	return s.leaseMap()[ip]
 }
 
 func readLeases() map[string]string {

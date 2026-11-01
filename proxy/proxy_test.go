@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -100,6 +101,117 @@ func TestParseYouTubeBadJSON(t *testing.T) {
 	yt := parseYouTube("https://www.youtube.com/youtubei/v1/player", nil, []byte(`{not json`))
 	if yt != nil {
 		t.Errorf("expected nil for bad JSON, got %+v", yt)
+	}
+}
+
+func TestParseYouTubeRichPlayerResponse(t *testing.T) {
+	body := []byte(`{
+	 "videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Never Gonna Give You Up",
+	  "author":"Rick Astley","channelId":"UCuAX","lengthSeconds":"213",
+	  "keywords":["rick astley","80s music"],"shortDescription":"Official video",
+	  "viewCount":"1832600234","isLiveContent":false,
+	  "thumbnail":{"thumbnails":[
+	   {"url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/hq.jpg","width":480,"height":360},
+	   {"url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/max.jpg","width":1280,"height":720}]}},
+	 "microformat":{"playerMicroformatRenderer":{"lengthSeconds":213,"category":"Music",
+	  "publishDate":"2009-10-24T23:57:33-07:00","uploadDate":"2009-10-25T00:00:00-07:00",
+	  "viewCount":1832600234,"isFamilySafe":true,"ownerChannelName":"Rick Astley",
+	  "externalChannelId":"UCuAX","thumbnail":{"thumbnails":[
+	   {"url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg","width":1280,"height":720}]}}}
+	}`)
+	yt := parseYouTube("https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+		[]byte(`{"videoId":"dQw4w9WgXcQ"}`), body)
+	if yt == nil {
+		t.Fatal("parseYouTube returned nil")
+	}
+	if yt.VideoID != "dQw4w9WgXcQ" || yt.Title != "Never Gonna Give You Up" || yt.Channel != "Rick Astley" {
+		t.Errorf("identity: %+v", yt)
+	}
+	if yt.ChannelID != "UCuAX" || yt.Seconds != 213 || yt.Category != "Music" {
+		t.Errorf("details: %+v", yt)
+	}
+	if len(yt.Tags) != 2 || yt.Tags[0] != "rick astley" || yt.Tags[1] != "80s music" {
+		t.Errorf("tags: %+v", yt.Tags)
+	}
+	if yt.Description != "Official video" || yt.PublishDate != "2009-10-24T23:57:33-07:00" || yt.ViewCount != 1832600234 {
+		t.Errorf("metadata: %+v", yt)
+	}
+	if yt.FamilySafe == nil || !*yt.FamilySafe || yt.Live {
+		t.Errorf("flags: %+v", yt)
+	}
+	if !strings.HasSuffix(yt.Thumbnail, "/max.jpg") {
+		t.Errorf("thumbnail = %q, want the largest", yt.Thumbnail)
+	}
+	if yt.WatchURL != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+		t.Errorf("watch URL = %q", yt.WatchURL)
+	}
+}
+
+func TestParseYouTubeWatchPage(t *testing.T) {
+	body := []byte(`<html><head>
+<meta itemprop="name" content="A &amp; B">
+<meta itemprop="description" content="Desc">
+<meta itemprop="genre" content="Gaming">
+<meta name="keywords" content="minecraft, gaming, lets play">
+<meta itemprop="datePublished" content="2020-01-02">
+<meta itemprop="duration" content="PT1H2M3S">
+<meta itemprop="isFamilyFriendly" content="true">
+<meta itemprop="identifier" content="watchid123">
+<meta property="og:image" content="https://i.ytimg.com/vi/watchid123/maxresdefault.jpg">
+</head><body><script>var ytInitialPlayerResponse = {"videoDetails":{"videoId":"watchid123","title":"A } B","author":"Chan","lengthSeconds":"3723"},"microformat":{"playerMicroformatRenderer":{"category":"Gaming","publishDate":"2020-01-02","isFamilySafe":true}}};</script></body></html>`)
+	yt := parseYouTube("https://www.youtube.com/watch?v=watchid123", nil, body)
+	if yt == nil {
+		t.Fatal("parseYouTube returned nil")
+	}
+	if yt.VideoID != "watchid123" || yt.Title != "A } B" || yt.Channel != "Chan" {
+		t.Errorf("embedded player metadata: %+v", yt)
+	}
+	if yt.Category != "Gaming" || yt.Seconds != 3723 {
+		t.Errorf("details: %+v", yt)
+	}
+	if len(yt.Tags) != 3 || yt.Tags[2] != "lets play" {
+		t.Errorf("tags: %+v", yt.Tags)
+	}
+	if yt.Description != "Desc" || yt.PublishDate != "2020-01-02" {
+		t.Errorf("meta fallback: %+v", yt)
+	}
+	if yt.FamilySafe == nil || !*yt.FamilySafe {
+		t.Errorf("family safe: %+v", yt.FamilySafe)
+	}
+	if !strings.HasSuffix(yt.Thumbnail, "maxresdefault.jpg") {
+		t.Errorf("thumbnail = %q", yt.Thumbnail)
+	}
+}
+
+func TestParseISODuration(t *testing.T) {
+	for in, want := range map[string]int{
+		"PT45S":    45,
+		"PT3M34S":  214,
+		"PT1H2M3S": 3723,
+		"P1DT2H":   93600,
+		"nonsense": 0,
+		"PT0S":     0,
+	} {
+		if got := parseISODuration(in); got != want {
+			t.Errorf("parseISODuration(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestWantsYouTubeMetadata(t *testing.T) {
+	for _, c := range []struct {
+		host, path string
+		want       bool
+	}{
+		{"www.youtube.com", "/watch", true},
+		{"m.youtube.com", "/shorts/abc", true},
+		{"www.youtube.com", "/youtubei/v1/player", true},
+		{"www.youtube.com", "/feed/subscriptions", false},
+		{"example.com", "/watch", false},
+	} {
+		if got := wantsYouTubeMetadata(c.host, c.path); got != c.want {
+			t.Errorf("wantsYouTubeMetadata(%q, %q) = %v, want %v", c.host, c.path, got, c.want)
+		}
 	}
 }
 
@@ -686,6 +798,134 @@ func testDB(t *testing.T) *sql.DB {
 		t.Fatalf("schema: %v", err)
 	}
 	return db
+}
+
+func TestMigrateAddsYouTubeColumns(t *testing.T) {
+	db, err := writableDB(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE youtube (
+		id INTEGER PRIMARY KEY, ts INTEGER, device TEXT, video_id TEXT,
+		title TEXT, channel TEXT, seconds INTEGER, query TEXT, url TEXT)`); err != nil {
+		t.Fatalf("old schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO youtube (ts,device,video_id,title,channel,seconds,query,url)
+		VALUES (1,'aa:bb','vid','Old title','Old channel',5,'','https://www.youtube.com/youtubei/v1/player')`); err != nil {
+		t.Fatalf("old row: %v", err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	rows, err := db.Query(`PRAGMA table_info(youtube)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             any
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		have[name] = true
+	}
+	rows.Close()
+	for _, c := range youtubeAdded {
+		if !have[c.name] {
+			t.Errorf("migrate did not add column %q", c.name)
+		}
+	}
+	var title string
+	if err := db.QueryRow(`SELECT title FROM youtube WHERE video_id='vid'`).Scan(&title); err != nil {
+		t.Fatalf("old row lost: %v", err)
+	}
+	if title != "Old title" {
+		t.Errorf("title = %q", title)
+	}
+}
+
+func TestYouTubeMetadataUpsert(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Capture.SnippetBytes = 4096
+	s, err := openStore(cfg)
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer s.Close()
+
+	family := true
+	ev := func(v *YouTube) *Event {
+		return &Event{TS: time.Now(), SrcIP: "192.168.30.50", Method: "GET",
+			Scheme: "https", Host: "www.youtube.com", Status: 200, Action: "bump",
+			URL: "https://www.youtube.com/watch?v=vid42", Video: v}
+	}
+	if err := s.writeEvent(ev(&YouTube{
+		VideoID: "vid42", Title: "A Video", Channel: "A Channel", ChannelID: "UC1",
+		Seconds: 213, Category: "Music", Tags: []string{"one", "two"},
+		Description: "Description", PublishDate: "2020-01-01", ViewCount: 1234,
+		FamilySafe: &family, Thumbnail: "https://i.ytimg.com/vi/vid42/hq.jpg",
+		WatchURL: "https://www.youtube.com/watch?v=vid42",
+	})); err != nil {
+		t.Fatalf("writeEvent: %v", err)
+	}
+	// A later hit often carries only the ID; it must not blank the metadata.
+	if err := s.writeEvent(ev(&YouTube{VideoID: "vid42"})); err != nil {
+		t.Fatalf("second writeEvent: %v", err)
+	}
+	var (
+		title, channel, category, tags, desc, watch, thumb string
+		view, familySafe                                   int64
+		seconds                                            int
+	)
+	if err := s.db.QueryRow(`SELECT title,channel,category,tags,description,watch_url,
+		thumbnail,view_count,family_safe,seconds FROM youtube WHERE video_id='vid42'`).
+		Scan(&title, &channel, &category, &tags, &desc, &watch, &thumb, &view, &familySafe, &seconds); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if title != "A Video" || channel != "A Channel" || category != "Music" || seconds != 213 {
+		t.Errorf("identity lost: title=%q channel=%q category=%q seconds=%d", title, channel, category, seconds)
+	}
+	if tags != `["one","two"]` || desc != "Description" || watch != "https://www.youtube.com/watch?v=vid42" {
+		t.Errorf("metadata lost: tags=%q desc=%q watch=%q", tags, desc, watch)
+	}
+	if !strings.HasSuffix(thumb, "hq.jpg") || view != 1234 || familySafe != 1 {
+		t.Errorf("extra metadata lost: thumb=%q view=%d family=%d", thumb, view, familySafe)
+	}
+}
+
+func TestWriteExportTSV(t *testing.T) {
+	family := false
+	videos := []exportVideo{{
+		Date: "2026-10-31", Weekday: "Sat", Hour: 22, Device: "aa:bb:cc:dd:ee:ff",
+		VideoID: "vid42", Title: "A\tVideo", Channel: "A Channel", Category: "Music",
+		Tags: []string{"one", "two"}, Seconds: 213, PublishDate: "2020-01-01",
+		ViewCount: 42, FamilySafe: &family, URL: "https://www.youtube.com/watch?v=vid42",
+	}}
+	var b bytes.Buffer
+	writeExportTSV(&b, videos)
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2:\n%s", len(lines), b.String())
+	}
+	fields := strings.Split(lines[1], "\t")
+	if len(fields) != 14 {
+		t.Fatalf("fields = %d, want 14: %q", len(fields), fields)
+	}
+	if fields[0] != "2026-10-31" || fields[1] != "Sat" || fields[2] != "22" {
+		t.Errorf("date fields = %q", fields[:3])
+	}
+	if fields[5] != "A Video" {
+		t.Errorf("title not flattened: %q", fields[5])
+	}
+	if fields[8] != `["one","two"]` || fields[12] != "false" {
+		t.Errorf("tags/family = %q / %q", fields[8], fields[12])
+	}
 }
 
 func TestRulesAllowOverridesBlock(t *testing.T) {

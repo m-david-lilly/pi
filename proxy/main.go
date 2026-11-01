@@ -28,6 +28,8 @@ func main() {
 		caCmd(os.Args[2:])
 	case "query":
 		queryCmd(os.Args[2:])
+	case "export":
+		exportCmd(os.Args[2:])
 	case "stats":
 		statsCmd(os.Args[2:])
 	case "rule":
@@ -53,6 +55,7 @@ func usage() {
   kidproxy ca mobileconfig [--cert ...] [--out file]
   kidproxy notify-test [--config /etc/kidproxy/config.yaml]
   kidproxy query [--kind events] [--since 24h] [--host x] [--q text] [--limit 100]
+  kidproxy export [--kind youtube] [--format tsv|json] [--since 7d] [--tz America/Phoenix]
   kidproxy stats [--since 24h]
   kidproxy rule add|rm|list [--action block|allow] [--value domain]
   kidproxy alerts clear [--kind tls-pin]`)

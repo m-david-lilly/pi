@@ -94,6 +94,14 @@ tr.click:hover td { background: rgba(255,255,255,0.03); }
 td .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 8px; vertical-align: -1px; }
 .note { font-size: 0.75rem; color: var(--text-dim); margin-top: 6px; }
 .empty { color: var(--text-dim); font-size: 0.85rem; padding: 30px 0; text-align: center; }
+.ytgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 14px; }
+@media (max-width: 800px) { .ytgrid { grid-template-columns: 1fr; } }
+.card h3 { font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; color: var(--text-dim); }
+.chip { display: inline-block; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; margin: 2px 4px 2px 0; font-size: 0.72rem; color: var(--text-dim); }
+.chip.click { cursor: pointer; }
+.chip.click:hover { border-color: var(--text-dim); color: var(--text); }
+td a { color: var(--accent); text-decoration: none; }
+td a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -145,6 +153,24 @@ td .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; m
       were active, so services can add up to slightly more than their category.
     </div>
   </div>
+
+  <div class="card" id="yt-card" style="display:none">
+    <h2 id="yt-title">YouTube content</h2>
+    <div class="hint" id="yt-hint"></div>
+    <div class="tiles" id="yt-tiles"></div>
+    <div class="ytgrid">
+      <div><h3>Content categories</h3><div id="yt-cats"></div></div>
+      <div><h3>Top tags</h3><div id="yt-tags"></div></div>
+    </div>
+    <div id="yt-active" style="margin-bottom:8px"></div>
+    <h3>Videos</h3>
+    <div id="yt-videos"></div>
+    <div class="note">
+      Metadata comes from YouTube's player response and watch page: title, channel, content category, tags,
+      duration, publish date and view count. Only videos watched on the kids WiFi appear here; playback time
+      itself is measured in whole minutes in the charts above.
+    </div>
+  </div>
 </div>
 
 <script>
@@ -152,7 +178,8 @@ const API = '/cgi-bin/admin';
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const SLOTS = 8;
 let DATA = null;
-const state = {range: 14, kid: 'all', cat: null, day: null};
+let YT = null;
+const state = {range: 14, kid: 'all', cat: null, svc: null, ytcat: null, yttag: null, day: null};
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
@@ -278,9 +305,18 @@ function render() {
   var catLabel = state.cat ? (DATA.categories.filter(function(c) { return c.id === state.cat; })[0] || {}).label : null;
 
   // Breadcrumb
-  document.getElementById('crumbs').innerHTML = state.cat
-    ? '<a onclick="drill(null)">All categories</a> › ' + esc(catLabel)
-    : 'All categories — click a category to see its services';
+  var ytCat = youtubeCategory();
+  var crumbs;
+  if (!state.cat) {
+    crumbs = 'All categories — click a category to see its services';
+  } else if (state.svc === 'youtube') {
+    crumbs = '<a onclick="drill(null)">All categories</a> › ' +
+      '<a onclick="drill(\'' + esc(state.cat) + '\')">' + esc(catLabel) + '</a> › YouTube content';
+  } else {
+    crumbs = '<a onclick="drill(null)">All categories</a> › ' + esc(catLabel);
+    if (state.cat === ytCat) crumbs += ' — click the YouTube row to see what was watched';
+  }
+  document.getElementById('crumbs').innerHTML = crumbs;
 
   // Totals per series and overall
   var totals = defs.map(function(d, i) { return agg.byDay[i].reduce(function(a, b) { return a + b; }, 0); });
@@ -307,7 +343,9 @@ function render() {
 
   // Legend (clickable at the top level: drill into the category)
   document.getElementById('legend').innerHTML = defs.map(function(d) {
-    var click = !state.cat ? ' class="click" onclick="drill(\'' + esc(d.id) + '\')" title="Show ' + esc(d.label) + ' services"' : '';
+    var click = '';
+    if (!state.cat) click = ' class="click" onclick="drill(\'' + esc(d.id) + '\')" title="Show ' + esc(d.label) + ' services"';
+    else if (d.id === 'youtube') click = ' class="click" onclick="drillSvc(\'youtube\')" title="Show YouTube content"';
     return '<span' + click + '><i style="background:' + d.color + '"></i>' + esc(d.label) + '</span>';
   }).join('');
 
@@ -321,7 +359,7 @@ function render() {
   stackChart(document.getElementById('chart-daily'), {
     labels: dayLabels, titles: dayTitles, defs: defs, values: agg.byDay, height: 240,
     selected: state.day,
-    onSeg: state.cat ? null : function(si) { drill(defs[si].id); },
+    onSeg: state.cat ? function(si) { if (defs[si].id === 'youtube') drillSvc('youtube'); } : function(si) { drill(defs[si].id); },
     onCol: function(i) { state.day = state.day === i ? null : i; render(); }
   });
 
@@ -337,7 +375,7 @@ function render() {
   }
   stackChart(document.getElementById('chart-hour'), {
     labels: hourLabels, titles: hourTitles, defs: defs, values: agg.byHour, height: 200, everyLabel: true,
-    onSeg: state.cat ? null : function(si) { drill(defs[si].id); }
+    onSeg: state.cat ? function(si) { if (defs[si].id === 'youtube') drillSvc('youtube'); } : function(si) { drill(defs[si].id); }
   });
 
   // Day of week: average per occurrence of each weekday in range
@@ -351,7 +389,7 @@ function render() {
   stackChart(document.getElementById('chart-weekday'), {
     labels: WEEKDAYS, titles: WEEKDAYS.map(function(w, i) { return w + ' (avg of ' + wdCount[i] + ')'; }),
     defs: defs, values: byWd, height: 200, everyLabel: true,
-    onSeg: state.cat ? null : function(si) { drill(defs[si].id); }
+    onSeg: state.cat ? function(si) { if (defs[si].id === 'youtube') drillSvc('youtube'); } : function(si) { drill(defs[si].id); }
   });
 
   // Table view (also the accessible view of every chart)
@@ -363,12 +401,18 @@ function render() {
       order.filter(function(i) { return totals[i] > 0; }).map(function(i) {
         var d = defs[i], peak = 0, pdi = -1;
         agg.byDay[i].forEach(function(v, di) { if (v > peak) { peak = v; pdi = di; } });
-        var click = !state.cat ? ' class="click" onclick="drill(\'' + esc(d.id) + '\')"' : '';
-        return '<tr' + click + '><td><span class="sw" style="background:' + d.color + '"></span>' + esc(d.label) + '</td>' +
+        var click = '';
+        if (!state.cat) click = ' class="click" onclick="drill(\'' + esc(d.id) + '\')"';
+        else if (d.id === 'youtube') click = ' class="click" onclick="drillSvc(\'youtube\')" title="Show YouTube content"';
+        var label = esc(d.label) + (state.cat && d.id === 'youtube' ? ' <span style="color:var(--text-dim)">›</span>' : '');
+        return '<tr' + click + '><td><span class="sw" style="background:' + d.color + '"></span>' + label + '</td>' +
           '<td class="num">' + fmtMin(totals[i]) + '</td><td class="num">' + fmtMin(totals[i] / nd) + '</td>' +
           '<td class="num">' + Math.round(100 * totals[i] / total) + '%</td>' +
           '<td class="num">' + (pdi >= 0 ? dayTitles[pdi] + ' · ' + fmtMin(peak) : '—') + '</td></tr>';
       }).join('') + '</tbody></table>';
+
+  document.getElementById('yt-card').style.display = state.svc === 'youtube' ? '' : 'none';
+  if (state.svc === 'youtube') ensureYT();
 }
 
 function tile(label, value, sub) {
@@ -377,8 +421,165 @@ function tile(label, value, sub) {
 
 function drill(cat) {
   state.cat = cat;
+  state.svc = null;
+  state.ytcat = null;
+  state.yttag = null;
   render();
   window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function youtubeCategory() {
+  var s = DATA && DATA.services.filter(function(s) { return s.id === 'youtube'; })[0];
+  return s ? s.category : null;
+}
+
+function drillSvc(svc) {
+  state.svc = svc;
+  state.ytcat = null;
+  state.yttag = null;
+  render();
+  ensureYT();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+// ── YouTube content drill-down ───────────────────────────────
+// section=yt returns the videos the proxy captured, with local date/hour so
+// the day filter matches the stats days regardless of the browser timezone.
+
+function ymdDash(ymd) {
+  return ymd.slice(0, 4) + '-' + ymd.slice(4, 6) + '-' + ymd.slice(6, 8);
+}
+
+function ensureYT() {
+  if (state.svc !== 'youtube') return;
+  if (YT && YT.range === state.range) { renderYT(); return; }
+  var want = state.range;
+  document.getElementById('yt-hint').textContent = 'Loading captured video metadata…';
+  document.getElementById('yt-tiles').innerHTML = '';
+  document.getElementById('yt-cats').innerHTML = '';
+  document.getElementById('yt-tags').innerHTML = '';
+  document.getElementById('yt-active').innerHTML = '';
+  document.getElementById('yt-videos').innerHTML = '';
+  fetch(API + '?section=yt&days=' + want)
+    .then(function(r) {
+      if (r.status === 401) { location.href = '/admin.html'; throw new Error('auth'); }
+      return r.json();
+    })
+    .then(function(d) {
+      if (want !== state.range) return;
+      YT = d;
+      YT.range = want;
+      renderYT();
+    })
+    .catch(function(err) {
+      if (err.message !== 'auth') {
+        document.getElementById('yt-hint').textContent = 'Could not load YouTube metadata.';
+        document.getElementById('yt-videos').innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+      }
+    });
+}
+
+function ytBase() {
+  if (!YT || !YT.videos) return [];
+  var macs = kidMacs();
+  var day = state.day === null ? null : ymdDash(DATA.days[state.day]);
+  return YT.videos.filter(function(v) {
+    if (macs && macs.include && !macs.include[v.device]) return false;
+    if (macs && macs.exclude && macs.exclude[v.device]) return false;
+    if (day && v.date !== day) return false;
+    return true;
+  });
+}
+
+function kidForMac(mac) {
+  for (var i = 0; i < DATA.kids.length; i++) {
+    if (DATA.kids[i].macs.indexOf(mac) >= 0) return DATA.kids[i].name;
+  }
+  return 'Unassigned';
+}
+
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  var m = Math.floor(s / 60), r = s % 60;
+  return m + 'm' + (r ? ' ' + r + 's' : '');
+}
+
+function ytFilterCat(cat) {
+  state.ytcat = cat || null;
+  renderYT();
+}
+
+function ytFilterTag(tag) {
+  state.yttag = tag || null;
+  renderYT();
+}
+
+function renderYT() {
+  if (state.svc !== 'youtube') return;
+  if (!YT || YT.range !== state.range) return;
+  var base = ytBase();
+  var cats = {}, tags = {}, totalLen = 0;
+  base.forEach(function(v) {
+    var c = v.category || 'Unknown';
+    cats[c] = (cats[c] || 0) + 1;
+    totalLen += v.seconds || 0;
+    (v.tags || []).forEach(function(t) { tags[t] = (tags[t] || 0) + 1; });
+  });
+  var catNames = Object.keys(cats).sort(function(a, b) { return cats[b] - cats[a]; });
+  var tagNames = Object.keys(tags).sort(function(a, b) { return tags[b] - tags[a]; }).slice(0, 15);
+  var topCat = catNames[0] || null;
+
+  var dayText = state.day === null ? 'all days' : dayLabel(DATA.days[state.day], true);
+  document.getElementById('yt-hint').textContent =
+    'Videos captured on the kids WiFi for this selection (' + dayText + '). Click a content category or tag to filter the list.';
+
+  document.getElementById('yt-tiles').innerHTML =
+    tile('Videos', String(base.length), 'in the selected range') +
+    tile('Content categories', String(catNames.length), 'distinct YouTube categories') +
+    tile('Top category', topCat ? esc(topCat) : '—', topCat ? cats[topCat] + (cats[topCat] === 1 ? ' video' : ' videos') : 'no videos yet') +
+    tile('Video length', fmtMin(totalLen / 60), 'sum of the videos’ durations');
+
+  document.getElementById('yt-cats').innerHTML = catNames.length
+    ? '<table><thead><tr><th>Category</th><th class="num">Videos</th><th class="num">Share</th></tr></thead><tbody>' +
+      catNames.map(function(c) {
+        return '<tr class="click" onclick="ytFilterCat(this.dataset.cat)" data-cat="' + esc(c) + '">' +
+          '<td>' + esc(c) + '</td><td class="num">' + cats[c] + '</td>' +
+          '<td class="num">' + Math.round(100 * cats[c] / base.length) + '%</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div class="empty">No videos captured for this selection yet.</div>';
+
+  document.getElementById('yt-tags').innerHTML = tagNames.length
+    ? tagNames.map(function(t) {
+        return '<span class="chip click" onclick="ytFilterTag(this.dataset.tag)" data-tag="' + esc(t) + '">' +
+          esc(t) + ' <b>' + tags[t] + '</b></span>';
+      }).join('')
+    : '<div class="empty">No tags captured for this selection yet.</div>';
+
+  var active = '';
+  if (state.ytcat) active += '<span class="chip click" onclick="ytFilterCat(null)">category: ' + esc(state.ytcat) + ' ×</span>';
+  if (state.yttag) active += '<span class="chip click" onclick="ytFilterTag(null)">tag: ' + esc(state.yttag) + ' ×</span>';
+  document.getElementById('yt-active').innerHTML = active;
+
+  var videos = base.filter(function(v) {
+    if (state.ytcat && (v.category || 'Unknown') !== state.ytcat) return false;
+    if (state.yttag && (v.tags || []).indexOf(state.yttag) < 0) return false;
+    return true;
+  }).sort(function(a, b) { return (b.ts || '').localeCompare(a.ts || ''); });
+
+  document.getElementById('yt-videos').innerHTML = videos.length
+    ? '<table><thead><tr><th>When</th><th>Kid</th><th>Title</th><th>Channel</th><th>Category</th><th>Tags</th><th class="num">Length</th><th class="num">Views</th><th>Family</th></tr></thead><tbody>' +
+      videos.map(function(v) {
+        var url = v.url || ('https://www.youtube.com/watch?v=' + v.video_id);
+        var when = v.date + ' ' + String(v.hour).padStart(2, '0') + ':00';
+        var chips = (v.tags || []).slice(0, 5).map(function(t) { return '<span class="chip">' + esc(t) + '</span>'; }).join('');
+        return '<tr><td>' + esc(when) + '</td><td>' + esc(kidForMac(v.device)) + '</td>' +
+          '<td><a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(v.title || v.video_id) + '</a></td>' +
+          '<td>' + esc(v.channel || '') + '</td><td>' + esc(v.category || '') + '</td>' +
+          '<td>' + chips + '</td><td class="num">' + fmtDur(v.seconds) + '</td>' +
+          '<td class="num">' + (v.view_count ? Number(v.view_count).toLocaleString() : '') + '</td>' +
+          '<td>' + (v.family_safe === true ? 'yes' : v.family_safe === false ? 'no' : '') + '</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div class="empty">No videos match this filter.</div>';
 }
 
 // ── Stacked column chart (SVG) ───────────────────────────────

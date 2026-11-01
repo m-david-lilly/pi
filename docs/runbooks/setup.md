@@ -1971,13 +1971,17 @@ Expect `Request: [10.0.0.4:… (Allowed Network (Subnet))]` — **not** `(WAN)`.
 A read-only page in the admin dashboard that shows how much time each kid spends on
 video, social media and games per day, broken down by service (YouTube, Netflix,
 TikTok, Roblox, …), by hour of the day and by day of the week, with a CSV export of
-the raw numbers for offline analysis.
+the raw numbers for offline analysis. Inside **Video → YouTube** it drills down one
+more level into *content*: which YouTube categories and tags were watched, and one row
+per video with its watch link.
 
 The numbers come from the same per-minute metering that enforces the daily time limits
 (`kids-schedule.sh`, see [`docs/reference/kids-schedules.md`](../reference/kids-schedules.md)).
-Nothing is decrypted and no URLs or page content are stored: the router counts minutes
-in which a kid device had real traffic to a service's servers, which it learns from the
-Pi's own DNS answers.
+The minutes are counted without decrypting anything: the router counts minutes in which
+a kid device had real traffic to a service's servers, which it learns from the Pi's own
+DNS answers. The YouTube titles/categories/tags come from the TLS-intercepting proxy
+([`docs/reference/kids-filtering.md`](../reference/kids-filtering.md) §3–§6), which
+reads the player metadata — never the video itself.
 
 ### 13.1 — Prerequisites
 
@@ -2005,6 +2009,18 @@ scp -O www/analytics.html root@192.168.1.1:/www/analytics.html
 ssh root@192.168.1.1 "chmod 755 /usr/bin/kids-schedule.sh /www/cgi-bin/admin && \
   chmod 644 /www/analytics.html && kids-schedule.sh install"
 ```
+
+The YouTube drill-down and the CSV video rows call `kidproxy export`, so the filtering
+proxy must be installed too (build with `powershell -File scripts\build-kidproxy.ps1`):
+
+```bash
+ssh root@192.168.1.1 '/etc/init.d/kidproxy stop'
+scp -O proxy/dist/kidproxy root@192.168.1.1:/usr/bin/kidproxy
+ssh root@192.168.1.1 'chmod 755 /usr/bin/kidproxy && /etc/init.d/kidproxy start'
+```
+
+`export` is read-only; without the proxy running, the page still shows all the time
+charts and the YouTube card simply has nothing to list.
 
 `install` is idempotent. On a config that still has the older category-level domain
 lists, it migrates them to per-service lists (20 services in Video, Social media and
@@ -2035,6 +2051,14 @@ scp -O root@192.168.1.1:/etc/config/dhcp config/etc-config/dhcp
    ```
 4. **Download CSV** saves `kids-usage-<date>-<N>d.csv`; it opens in Excel/Sheets with a
    header row.
+5. Drill into **Video → YouTube** (click the category, then the YouTube row) and confirm
+   the *YouTube content* card lists videos with titles and a content category. If it is
+   empty, check the proxy captured something:
+
+   ```bash
+   kidproxy query --kind youtube --since 24h --limit 5
+   kidproxy export --kind youtube --format tsv --since 1d --tz America/Phoenix | head -3
+   ```
 
 ### 13.4 — Using the page
 
@@ -2047,6 +2071,7 @@ scp -O root@192.168.1.1:/etc/config/dhcp config/etc-config/dhcp
 | **Time of day** | Minutes in each hour, summed over the range (or the selected day) |
 | **Day of week** | Average minutes per weekday over the range |
 | **Breakdown** table | Total, average per day, share and peak day per category/service — the text view of the charts |
+| **Video → YouTube** | Third level: content categories (Music, Gaming, Education, …), top tags, and one row per captured video with watch link, channel, length, views and family-safe flag. Click a category row or a tag chip to filter the list; the kid/day/range filters still apply |
 | Hover any column | Tooltip with the per-series minutes and the total |
 
 Colors follow the category or service (fixed config order), not its rank, so a service
@@ -2059,22 +2084,30 @@ order and folds the rest into *Other*.
 dashboard session). Columns:
 
 ```
-date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes
-2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",service,"Video","YouTube",38
-2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",category,"Video","",41
+date,weekday,hour,kid,device_mac,device_name,type,category,service,minutes,url,video_id,title,channel,tags,duration_seconds,publish_date,view_count,family_safe
+2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",service,"Video","YouTube",38,,,,,,,,
+2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",category,"Video","",41,,,,,,,,
+2026-10-30,Fri,16,"Alex",aa:bb:cc:dd:ee:ff,"Alex-iPad",video,"Music","YouTube",,"https://www.youtube.com/watch?v=dQw4w9WgXcQ","dQw4w9WgXcQ","Rick Astley - Never Gonna Give You Up","Rick Astley","[""rick astley"",""80s music""]",213,2009-10-24T23:57:33-07:00,1832604330,true
 ```
 
-- One row per **device × hour × service** (`type=service`) and per **device × hour ×
-  category** (`type=category`). Filter on `type` before summing, or you count twice.
-- `minutes` = active minutes in that hour (0–60).
+- One row per **device × hour × service** (`type=service`), per **device × hour ×
+  category** (`type=category`), and one per **captured YouTube video** (`type=video`).
+  Filter on `type` before summing, or you count twice.
+- `minutes` = active minutes in that hour (0–60). Video rows leave it empty — they are
+  "this video was opened", not a duration watched.
 - `kid` is resolved from the **current** device assignments; unassigned devices read
   `unassigned`. `device_name` is the DHCP hostname if the device has a current lease.
 - A category row counts a minute once even when several of its services were active,
   so a category's minutes can be less than the sum of its services'.
+- Video rows carry the full watch URL and the proxy's metadata: `category` is YouTube's
+  own content category, `tags` a JSON array, `duration_seconds` the video length,
+  `family_safe` `true`/`false`/empty when YouTube did not say.
 
 The page itself uses `GET /cgi-bin/admin?section=stats&days=N` (JSON: `days`, `kids`,
 `categories`, `services`, `devices`, and `rows` of
-`[dayIndex, hour, mac, "s"|"c", id, minutes]`).
+`[dayIndex, hour, mac, "s"|"c", id, minutes]`). The YouTube card lazy-loads
+`GET /cgi-bin/admin?section=yt&days=N` → `{"days":N,"videos":[...]}` straight from
+`kidproxy export --format json` (local date/hour from the router timezone).
 
 ### 13.6 — Where the data lives
 
