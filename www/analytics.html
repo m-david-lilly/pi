@@ -450,10 +450,14 @@ function ymdDash(ymd) {
   return ymd.slice(0, 4) + '-' + ymd.slice(4, 6) + '-' + ymd.slice(6, 8);
 }
 
+let ytPending = null;
+
 function ensureYT() {
   if (state.svc !== 'youtube') return;
   if (YT && YT.range === state.range) { renderYT(); return; }
+  if (ytPending === state.range) return;
   var want = state.range;
+  ytPending = want;
   document.getElementById('yt-hint').textContent = 'Loading captured video metadata…';
   document.getElementById('yt-tiles').innerHTML = '';
   document.getElementById('yt-cats').innerHTML = '';
@@ -466,12 +470,14 @@ function ensureYT() {
       return r.json();
     })
     .then(function(d) {
+      ytPending = null;
       if (want !== state.range) return;
       YT = d;
       YT.range = want;
       renderYT();
     })
     .catch(function(err) {
+      ytPending = null;
       if (err.message !== 'auth') {
         document.getElementById('yt-hint').textContent = 'Could not load YouTube metadata.';
         document.getElementById('yt-videos').innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
