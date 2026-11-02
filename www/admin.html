@@ -224,6 +224,8 @@ header .meta { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 .kids-rule:last-child { border-bottom: none; }
 .kids-rule .val { flex: 1; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 0.76rem; }
 .kids-rule .tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 99px; }
+.kids-rule .dev-inspect { display: flex; align-items: center; gap: 4px; font-size: 0.72rem; color: var(--text-dim); white-space: nowrap; }
+.kids-rule .dev-inspect input { flex: none; min-width: 0; margin: 0; padding: 0; }
 .tag-block { background: rgba(239,68,68,0.15); color: var(--red); }
 .tag-allow { background: rgba(34,197,94,0.15); color: var(--green); }
 .sched-kid { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
@@ -1544,12 +1546,17 @@ function renderSchedule(d) {
   html += '<div class="sched-note">Router time: ' + esc(d.now || '—') +
     '. Bedtimes and limits apply to devices on the kids WiFi only. Limits count minutes with real traffic ' +
     'to that category and reset at midnight; a limit of 0 blocks the category.</div>';
+  html += '<div class="sched-note">HTTPS inspection: a device that trusts the router certificate is decrypted so ' +
+    'content can be filtered and logged. Turn <b>Decrypt HTTPS</b> off for a device that cannot install the ' +
+    'certificate — it still goes through the proxy and blocked sites are refused, but page content and YouTube ' +
+    'details are not readable, and a blocked site shows a connection error instead of a block page.</div>';
 
   if (kids.length === 0) {
     html += '<div class="kids-empty">No kids yet. Add one below, then assign their devices and bedtimes.</div>';
   }
 
   var unassigned = devices.filter(function(dev) { return !assigned[dev.mac]; });
+  var pickable = unassigned.filter(function(dev) { return dev.online !== false; });
 
   kids.forEach(function(k) {
     var id = esc(k.id);
@@ -1567,14 +1574,16 @@ function renderSchedule(d) {
     html += '<h3>Devices</h3>';
     if (k.macs.length === 0) html += '<div class="kids-empty">No devices yet.</div>';
     k.macs.forEach(function(m) {
-      var dev = hostByMac[m];
-      html += '<div class="kids-rule"><span class="val">' + esc(dev ? dev.host : 'offline') +
-        ' <span style="color:var(--text-dim)">' + esc(m) + (dev ? ' · ' + esc(dev.ip) : '') + '</span></span>' +
+      var dev = hostByMac[m] || {mac: m, intercept: true, online: false};
+      var online = dev.online !== false;
+      html += '<div class="kids-rule"><span class="val">' + esc(dev.host || 'offline') +
+        ' <span style="color:var(--text-dim)">' + esc(m) + ' · ' + esc(online ? dev.ip : 'offline') + '</span></span>' +
+        deviceInterceptRow(dev) +
         '<button class="btn" onclick="postAction({action:\'sched_mac_del\',id:\'' + id + '\',mac:\'' + esc(m) + '\'})">Remove</button></div>';
     });
     html += '<div class="kids-rule-form"><select id="sched-dev-' + id + '">' +
       '<option value="">Pick a device on the kids WiFi…</option>' +
-      unassigned.map(function(dev) {
+      pickable.map(function(dev) {
         return '<option value="' + esc(dev.mac) + '">' + esc(dev.host) + ' — ' + esc(dev.mac) + ' (' + esc(dev.ip) + ')</option>';
       }).join('') +
       '</select><input id="sched-mac-' + id + '" type="text" placeholder="or type a MAC (aa:bb:cc:dd:ee:ff)" autocomplete="off">' +
@@ -1620,12 +1629,45 @@ function renderSchedule(d) {
 
   if (unassigned.length) {
     html += '<h3>Unassigned devices on the kids WiFi</h3>' + unassigned.map(function(dev) {
-      return '<div class="kids-rule"><span class="val">' + esc(dev.host) +
-        ' <span style="color:var(--text-dim)">' + esc(dev.mac) + ' · ' + esc(dev.ip) + '</span></span></div>';
+      return '<div class="kids-rule"><span class="val">' + esc(dev.host || 'unknown') +
+        ' <span style="color:var(--text-dim)">' + esc(dev.mac) + ' · ' +
+        esc(dev.online !== false ? dev.ip : 'offline') + '</span></span>' +
+        deviceInterceptRow(dev) + '</div>';
     }).join('');
   }
 
   body.innerHTML = html;
+}
+
+// One row of controls for a device: the per-device TLS switch plus the two
+// signals that say whether decryption is actually working for it. "CA trusted"
+// comes from the bootstrap page's probe; the failure count is the proxy's own
+// handshake errors, which usually mean a missing CA or a pinned app.
+function deviceInterceptRow(dev) {
+  var mac = esc(dev.mac);
+  var trust;
+  if (dev.ca_trust === true) trust = '<span class="sev sev-info">CA trusted</span>';
+  else if (dev.ca_trust === false) trust = '<span class="sev sev-warn">CA not trusted</span>';
+  else trust = '<span class="sched-note" style="margin:0">CA trust unknown</span>';
+  var fails = Number(dev.handshake_failures_24h || 0);
+  var hint = (dev.intercept && fails > 0)
+    ? '<span class="sev sev-high" title="TLS handshake failures from this device in the last 24 hours. It may not trust the CA, or an app may pin its certificate.">' +
+      fails + ' TLS fail' + (fails === 1 ? '' : 's') + '</span>'
+    : '';
+  return '<label class="dev-inspect" title="Decrypt this device\'s HTTPS so content can be filtered and logged. Turn it off for a device that cannot install the certificate.">' +
+    '<input type="checkbox"' + (dev.intercept ? ' checked' : '') +
+    ' onchange="deviceSetIntercept(\'' + mac + '\', this.checked)"> Decrypt HTTPS</label>' + trust + hint;
+}
+
+function deviceSetIntercept(mac, on) {
+  if (!on && !confirm('Stop decrypting HTTPS for this device?\n\n' +
+      'It still goes through the filtering proxy and blocked sites are refused, but the proxy cannot read ' +
+      'page content, log YouTube details, or show a block page. Only do this for a device that cannot ' +
+      'install the certificate.')) {
+    fetchSchedule(true);
+    return;
+  }
+  postAction({action: 'device_intercept', mac: mac, intercept: on});
 }
 
 function schedAddKid() {
@@ -1690,11 +1732,14 @@ function postAction(action) {
       // fetchAll leaves the Kids card alone while a search is active, so
       // refresh it explicitly or a rule/pause change would not show up.
       setTimeout(function() { fetchAll(); if (kidsQuery) fetchKids(); }, 2000);
-      // Schedule edits apply immediately on the Pi; redraw the card right away.
-      if (/^sched_/.test(payload.action)) fetchSchedule(true);
+      // Schedule and device edits apply immediately on the Pi; redraw the card
+      // right away. A failed request also redraws so a flipped checkbox snaps
+      // back to the stored value instead of lying until the next poll.
+      if (/^(sched_|device_)/.test(payload.action)) fetchSchedule(true);
       if (/^kids_(on|off|wifi_)/.test(payload.action)) setTimeout(fetchKidsWifi, 2000);
     })
     .catch(function(err) {
+      if (/^(sched_|device_)/.test(payload.action)) fetchSchedule(true);
       if (err.message !== 'auth') showToast('Error: ' + err.message);
     })
     .finally(function() {

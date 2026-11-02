@@ -34,6 +34,8 @@ func main() {
 		statsCmd(os.Args[2:])
 	case "rule":
 		ruleCmd(os.Args[2:])
+	case "device":
+		deviceCmd(os.Args[2:])
 	case "alerts":
 		alertsCmd(os.Args[2:])
 	case "notify-test":
@@ -58,6 +60,9 @@ func usage() {
   kidproxy export [--kind youtube] [--format tsv|json] [--since 7d] [--tz America/Phoenix]
   kidproxy stats [--since 24h]
   kidproxy rule add|rm|list [--action block|allow] [--value domain]
+  kidproxy device list
+  kidproxy device set --mac aa:bb:cc:dd:ee:ff --intercept on|off [--note text]
+  kidproxy device rm --mac aa:bb:cc:dd:ee:ff
   kidproxy alerts clear [--kind tls-pin]`)
 	os.Exit(2)
 }
@@ -87,7 +92,7 @@ func runCmd(args []string) {
 	notifier := newNotifier(cfg)
 	go notifier.Run(store.Alerts())
 
-	p := newProxy(cfg, ca, store, store.rules)
+	p := newProxy(cfg, ca, store, store.rules, store.policy)
 
 	go func() {
 		sig := make(chan os.Signal, 1)

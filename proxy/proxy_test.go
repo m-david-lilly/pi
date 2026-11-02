@@ -586,7 +586,7 @@ func TestBootstrapNamesTheLoadedCA(t *testing.T) {
 	}
 	ca := &CA{cert: cert}
 
-	page := bootstrapPage(ca)
+	page := bootstrapPage(ca, "setup.kids")
 	if !strings.Contains(page, "<b>Pi Home CA</b>") {
 		t.Error("bootstrap page does not name the loaded CA")
 	}
@@ -748,7 +748,7 @@ func TestPlainHTTPReplaysPeekedBytes(t *testing.T) {
 	}
 	cfg := &Config{}
 	cfg.Network.Gateway = "192.168.30.1"
-	p := newProxy(cfg, ca, nil, nil)
+	p := newProxy(cfg, ca, nil, nil, nil)
 	go func() { _ = p.srv.Serve(p.queue) }()
 	defer func() { _ = p.srv.Close() }()
 

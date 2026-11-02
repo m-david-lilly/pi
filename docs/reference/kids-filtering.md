@@ -138,20 +138,32 @@ Transparent mode (the only path a kids device can use):
 1. nft redirects the device's TCP 80/443 to `:8080`; the proxy recovers the
    original destination with `SO_ORIGINAL_DST` (`proxy/origdst_linux.go`).
 2. The proxy peeks the first byte:
-   - **`0x16`** → TLS record. It parses the ClientHello for **SNI**, mints a
-     leaf for that name, finishes the handshake, and serves the request through
-     `net/http` (HTTP/1.1 and HTTP/2 both work).
+   - **`0x16`** → TLS record. It parses the ClientHello for **SNI**, then either
+     decrypts or tunnels it depending on the **per-device switch** (below).
    - **anything else** → plain HTTP. The connection is handed to the HTTP server
      **with the peeked bytes replayed** (`prefixConn`), because `bufio.Peek`
-     already pulled the request out of the socket.
-3. The request is checked against the blocklist; a hit returns a `403` block page
-   instead of contacting the site.
-4. Otherwise the proxy dials the real host, reads the response, captures a
+     already pulled the request out of the socket. Plain HTTP is always inspected,
+     whatever the device's switch says.
+3. **Per-device TLS decision.** The source IP is resolved to a DHCP-lease MAC and
+   looked up in `device_policy`. Default is **decrypt**. Two cases are always
+   decrypted regardless of the row: the gateway/CA-install hosts (the trust probe
+   needs a real handshake) and hosts in `bypass:` (which tunnel anyway).
+   - **decrypt** → mint a leaf for the SNI, finish the handshake, serve the
+     request through `net/http` (HTTP/1.1 and HTTP/2 both work).
+   - **no decrypt** → **blind tunnel**: the already-read ClientHello is replayed
+     into the upstream connection and bytes flow untouched. The SNI is still
+     parsed, so the host is still **blocked and logged** — only the content is
+     unreadable.
+4. The request is checked against the blocklist. Decrypted → a `403` block page.
+   Tunneled → the connection is simply **closed** (a block page would only show
+   a certificate warning on a device that does not trust the CA).
+5. Otherwise the proxy dials the real host, reads the response, captures a
    snippet of text bodies, and streams the **full** body to the client.
-5. Hosts in `bypass:` (Signal/WhatsApp/Telegram API hosts) are **blind-tunnelled**:
+6. Hosts in `bypass:` (Signal/WhatsApp/Telegram API hosts) are **blind-tunnelled**:
    raw bytes, no decryption, no content logging.
-6. Requests to the gateway names (`192.168.30.1`, `setup.kids`,
-   `kidproxy.lan`) are answered locally with the **CA install page**.
+7. Requests to the gateway names (`192.168.30.1`, `setup.kids`,
+   `kidproxy.lan`) are answered locally with the **CA install page**, and are
+   always decrypted so the trust probe works.
 
 The explicit listener (`127.0.0.1:3128`) exists only for testing from the Pi and
 accepts **CONNECT only**. A plain `http://` request sent *through* it returns
@@ -192,6 +204,27 @@ online copy; keep the offline original in `.claude/.secrets/ca/` backed up and
 treat the router's filesystem as sensitive. Rotating it means re-issuing the
 uhttpd cert *and* re-installing the CA on every device.
 
+### Devices that cannot install the CA
+
+Some devices (work laptops, older Android apps, consoles) will never trust a
+custom CA. For those, turn **decrypt off** for that device — see §8. It keeps
+working on the kids WiFi with host-level filtering and logging; only content and
+YouTube metadata are lost.
+
+### Telling whether a device trusts the CA
+
+The install page checks this itself. It fetches `https://<host>/ca-probe` from
+JavaScript; the request only completes if the device accepted a certificate
+minted by our CA. The page then POSTs the answer to `/ca-trust?ok=1|0`, which the
+proxy records per MAC in `device_policy.ca_trust`. Over HTTPS the handshake has
+already proved trust, so the page reports success without probing.
+
+The dashboard shows the result next to the device (`CA trusted`, `CA not
+trusted`, `CA trust unknown`) together with the number of TLS handshake failures
+from that device in the last 24 h — the usual signal of a missing CA or an app
+that pins its certificate. The probe is a hint, not a control: the parent still
+decides whether to stop decrypting.
+
 ---
 
 ## 6. What gets recorded
@@ -207,6 +240,7 @@ One SQLite database, `/var/lib/kidproxy/events.db`, WAL mode, pruned every 6 h t
 | `alerts` | Rule matches and notable events (see §7) |
 | `rules` | Dashboard-added `block`/`allow` domains |
 | `devices` | IP → MAC → friendly name |
+| `device_policy` | Per-device HTTPS switch: `mac`, `intercept` (1 = decrypt), `note`, `ca_trust`, `ca_trust_ts`, `updated_ts`. Unknown devices default to `intercept=1` |
 
 Capture limits (`capture:` in the config): bodies are inspected up to
 `max_body_bytes` (256 KiB) and only `text/html`, `text/plain`, JSON and XHTML are
@@ -241,7 +275,17 @@ kidproxy query --kind youtube --q "minecraft" # also matches category/tags/descr
 kidproxy query --kind searches --since 7d
 kidproxy query --kind devices
 kidproxy query --kind rules
+kidproxy device list                            # leases + per-device policy, JSON
+kidproxy device set --mac 94:18:65:61:63:e1 --intercept off
+kidproxy device set --mac ... --intercept on --note "school laptop"
+kidproxy device rm --mac ...                    # back to the default (decrypt)
 ```
+
+`device list` merges kids-subnet DHCP leases with policy rows, so a device that
+is offline still appears (with `"online": false`) and can be changed before it
+rejoins. It reports `configured`, `ca_trust`, `ca_trust_at`,
+`handshake_failures_24h` and `updated_at`. Policy changes take effect within
+5 s — the proxy refreshes its cache on a ticker, no restart needed.
 
 `export` is the machine-readable form the dashboard uses (local date, weekday and
 hour come from `--tz`, defaulting to `alert.timezone`):
@@ -336,9 +380,21 @@ kids-toggle.sh resume       # end a pause early
 - **Search** box: substring search over URLs and page text, sticky across the 10 s
   auto-refresh until cleared.
 
+The **Schedule** card also lists each assigned device with:
+
+- **Decrypt HTTPS** — the per-device switch (§4). Turning it off asks for
+  confirmation, then applies within ~5 s. The device keeps host-level filtering;
+  content and YouTube metadata stop.
+- **CA trusted / CA not trusted / CA trust unknown** — from the install page's
+  probe (§5).
+- **`N TLS fails`** — handshake errors from that device in 24 h, shown only while
+  decrypting. Usually a missing CA or a pinned app.
+
 Backed by `GET /cgi-bin/admin?section=kids[&q=text]` (also embedded in
 `section=all`) and the POST actions `kids_on`, `kids_off`, `kids_pause`,
-`kids_resume`, `kids_rule`, `kids_rule_rm`.
+`kids_resume`, `kids_rule`, `kids_rule_rm`. The device list comes from
+`section=schedule` (its `devices` array, backed by `kidproxy device list`), and the
+switches use `device_intercept` / `device_reset`.
 
 **Kids Analytics** (`https://192.168.1.1/analytics.html`) is the time-and-content
 view: per-kid/per-day/per-hour minutes per category, and a third-level YouTube
@@ -403,6 +459,16 @@ To cut wear on a card you intend to keep:
   data, a VPN profile, or its own hotspot is outside this design.
 - **Snapchat/Instagram/TikTok are not bypassed by default.** If they break, add
   their API hosts to `bypass:` knowingly — those hosts then stop being inspected.
+- **Decrypt-off devices are filtered by hostname only.** With the per-device
+  switch off, the proxy sees the SNI but not the URL, page text, search queries or
+  YouTube metadata. A blocked host is refused by closing the connection, so the
+  browser shows a generic connection error rather than the block page. Plain
+  `http://` is still fully inspected. This is the trade-off for devices that
+  cannot install the CA — prefer installing it wherever possible.
+- **A device only has a policy if it has a DHCP lease.** The switch is keyed by
+  MAC, and the MAC comes from `/tmp/dhcp.leases`. A kids device configured with a
+  **static IP** has no lease, so it is not listed and defaults to decrypt; give it
+  a DHCP reservation instead if you need to turn its inspection off.
 
 ---
 
@@ -418,6 +484,9 @@ To cut wear on a card you intend to keep:
 | A site is blocked that should not be | Add an **allow** rule in the dashboard; it wins over the blocklist and applies within 60 s. |
 | Dashboard shows `Not filtering` | `kids-toggle.sh status`; usually `nft=absent` after a manual `fw4 reload` or a pause. `kids-nft.sh apply` restores it. |
 | Hundreds of `tls-pin` alerts | A pinned app. `kidproxy alerts clear --kind tls-pin`; the proxy now dedupes per hour. |
+| One device shows certificate errors on every site | Its CA is not installed. Either install it from `http://192.168.30.1/`, or turn **Decrypt HTTPS** off for that device in the dashboard (`kidproxy device set --mac … --intercept off`). |
+| A device still gets decrypted after turning the switch off | Check it has a DHCP lease (`kidproxy device list`); a static IP has no MAC, so it defaults to decrypt. Changes apply within 5 s. |
+| A blocked site on a decrypt-off device shows a connection error, not a block page | Expected — the device does not trust the CA, so there is no safe way to render a page. The block is still logged with `action=block`. |
 | CGI returns 500 / `syntax error` | `www/cgi-bin/admin` was saved with CRLF. `.gitattributes` forces LF; check `git ls-files --eol www/`. |
 | A POST returns two JSON bodies, or an invalid value is still applied | A `break` in a `case` branch — a silent no-op in BusyBox ash outside a loop. Must be `return`; see `AGENTS.md` trap #14. |
 | Proxy won't start | `kidproxy check --config /etc/kidproxy/config.yaml`, then `logread \| grep kidproxy`. |

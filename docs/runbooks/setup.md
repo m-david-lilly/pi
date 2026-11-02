@@ -2146,3 +2146,41 @@ To wipe history: `rm -f /etc/kids-stats/*.tsv /tmp/kids-stats/*.tsv`.
 | Hours look shifted | Router timezone not set — see 13.1 |
 | A service never shows up | Its domain list may be incomplete. Add domains to the service in `/etc/config/kids_schedule`; the next `apply` rebuilds the sets and restarts dnsmasq |
 | Analytics page redirects to the admin page | No or expired session — sign in on the admin page first |
+
+### 13.8 — Per-device HTTPS inspection
+
+A device that cannot install the router CA (a work laptop, a console, an old tablet)
+would show a certificate warning on every HTTPS page. Instead of leaving it offline,
+turn decryption off **for that device only**:
+
+1. Install the CA where possible — it is what makes titles, categories and page text
+   visible (`http://192.168.30.1/`).
+2. Open **Bedtimes & Time Limits**; each assigned device shows a **Decrypt HTTPS**
+   checkbox, a CA-trust badge and, while decrypting, a count of recent TLS failures.
+3. Clear **Decrypt HTTPS** for the device and confirm. It applies within ~5 s.
+
+From the shell, the same switch:
+
+```bash
+kidproxy device list                                  # leases + policy, JSON
+kidproxy device set --mac 94:18:65:61:63:e1 --intercept off
+kidproxy device set --mac 94:18:65:61:63:e1 --intercept on --note "fixed"
+kidproxy device rm  --mac 94:18:65:61:63:e1           # back to the default
+```
+
+What changes for that device: it still goes through the proxy and is still filtered
+and logged **by hostname**; blocked hosts are refused by closing the connection (so
+the browser shows a connection error, not the block page); page text, search queries
+and YouTube metadata are no longer captured; plain `http://` is still fully
+inspected. The switch is keyed by MAC from the DHCP lease, so a device with a static
+IP is not listed — give it a DHCP reservation first.
+
+**CA trust badge.** The install page probes `https://<host>/ca-probe` and reports the
+answer to the proxy, which stores it per MAC. `CA trusted` means the device accepted
+a certificate minted by our CA; `CA trust unknown` means the page has not been opened
+since the feature was deployed (or the device is offline). The probe is a hint — the
+parent still makes the call.
+
+The dashboard uses `GET /cgi-bin/admin?section=schedule` (its `devices` array,
+backed by `kidproxy device list`) and the POST actions `device_intercept` and
+`device_reset`.

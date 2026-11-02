@@ -75,14 +75,15 @@ type Proxy struct {
 	ca        *CA
 	store     *Store
 	rules     *Rules
+	policy    *Policy
 	transport *http.Transport
 	srv       *http.Server
 	queue     *connQueue
 	conns     sync.Map // net.Conn -> *connMeta
 }
 
-func newProxy(cfg *Config, ca *CA, store *Store, rules *Rules) *Proxy {
-	p := &Proxy{cfg: cfg, ca: ca, store: store, rules: rules, queue: newConnQueue()}
+func newProxy(cfg *Config, ca *CA, store *Store, rules *Rules, policy *Policy) *Proxy {
+	p := &Proxy{cfg: cfg, ca: ca, store: store, rules: rules, policy: policy, queue: newConnQueue()}
 	p.transport = &http.Transport{
 		Proxy:                 nil,
 		DialContext:           upstreamDialer().DialContext,
@@ -211,10 +212,30 @@ func (p *Proxy) handleConn(c net.Conn, transparent bool) {
 	p.bump(c, br, consumed, host, dstPort)
 }
 
-// bump terminates TLS with a CA-minted certificate and serves the request.
+// bump terminates TLS with a CA-minted certificate and serves the request, or
+// tunnels it untouched when the device is configured not to be decrypted.
 func (p *Proxy) bump(c net.Conn, br *bufio.Reader, consumed []byte, host string, port int) {
+	src := remoteIP(c)
+	// The CA install page is the one host that is always decrypted: it is how a
+	// device obtains the certificate, and its trust probe needs a real
+	// handshake to tell whether the device trusts it.
+	intercept := p.isBootstrapHost(host) || p.deviceIntercept(src)
+
 	if ok, note := p.rules.blocked(host); ok {
-		p.serveBlockedTLS(c, br, consumed, host, port, note)
+		if intercept {
+			p.serveBlockedTLS(c, br, consumed, host, port, note)
+		} else {
+			// No block page: on a device without the CA the browser would show
+			// a certificate error instead, and the handshake itself is the
+			// signal. Refuse the connection so the host is still enforced.
+			p.logEvent(&Event{SrcIP: src, Host: host, Scheme: "https", Action: "block",
+				Reason: note, URL: fmt.Sprintf("https://%s:%d/", host, port)})
+			_ = c.Close()
+		}
+		return
+	}
+	if !intercept {
+		p.tunnel(c, br, consumed, host, port, "device: no-intercept")
 		return
 	}
 	if p.isBypass(host) {
@@ -237,8 +258,13 @@ func (p *Proxy) bump(c net.Conn, br *bufio.Reader, consumed []byte, host string,
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		p.logEvent(&Event{SrcIP: remoteIP(c), Host: host, Action: "error",
-			Reason: "handshake: " + err.Error(), URL: fmt.Sprintf("https://%s:%d/", host, port)})
+		// The bootstrap page's trust probe handshakes on purpose. A failure
+		// there is the expected answer for a device without the certificate,
+		// and /ca-trust records it; alerting on every page load would be noise.
+		if !p.isBootstrapHost(host) {
+			p.logEvent(&Event{SrcIP: src, Host: host, Action: "error",
+				Reason: "handshake: " + err.Error(), URL: fmt.Sprintf("https://%s:%d/", host, port)})
+		}
 		_ = c.Close()
 		return
 	}
@@ -310,6 +336,19 @@ func (p *Proxy) handleExplicit(c net.Conn, br *bufio.Reader) {
 	}
 	_ = c.SetReadDeadline(time.Time{})
 	p.bump(c, br, consumed, sni, port)
+}
+
+// deviceIntercept resolves the source IP to a lease MAC and asks the policy
+// cache. Unknown devices are inspected, preserving the pre-toggle behaviour.
+func (p *Proxy) deviceIntercept(srcIP string) bool {
+	if p.policy == nil {
+		return true
+	}
+	mac := ""
+	if p.store != nil {
+		mac = p.store.deviceMAC(srcIP)
+	}
+	return p.policy.Intercept(mac)
 }
 
 func (p *Proxy) isBypass(host string) bool {

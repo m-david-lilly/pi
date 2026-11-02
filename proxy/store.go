@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS rules (
   id INTEGER PRIMARY KEY, kind TEXT, value TEXT, action TEXT, note TEXT,
   added_ts INTEGER
 );
+CREATE TABLE IF NOT EXISTS device_policy (
+  mac TEXT PRIMARY KEY, intercept INTEGER NOT NULL DEFAULT 1, note TEXT,
+  ca_trust INTEGER, ca_trust_ts INTEGER, updated_ts INTEGER
+);
 `
 
 // youtubeAdded are the columns added after the first release. CREATE TABLE IF
@@ -167,6 +171,7 @@ type Store struct {
 	db        *sql.DB
 	cfg       *Config
 	rules     *Rules
+	policy    *Policy
 	ch        chan *Event
 	alerts    chan *Alert
 	leases    map[string]string // ip -> mac
@@ -205,6 +210,7 @@ func openStore(cfg *Config) (*Store, error) {
 		stop:      make(chan struct{}),
 	}
 	s.rules = newRules(cfg, db)
+	s.policy = newPolicy(db)
 	go s.writer()
 	return s, nil
 }
@@ -440,6 +446,7 @@ func truncate(s string, n int) string {
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.stop)
+		s.policy.Close()
 		_ = s.db.Close()
 	})
 }

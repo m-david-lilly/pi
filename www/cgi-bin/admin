@@ -574,14 +574,15 @@ schedule_json_raw() {
 	categories=$(echo "$sched_status" | awk '$1 == "category" {
 		id = $2; $1 = ""; $2 = ""; label = substr($0, 3); gsub(/[^A-Za-z0-9 &._-]/, "", label)
 		printf "%s{\"id\":\"%s\",\"label\":\"%s\"}", (n++ ? "," : ""), id, label }')
-	devices=$(awk '$3 ~ /^192\.168\.30\./ {
-		h = $4; gsub(/[^A-Za-z0-9._-]/, "", h); if (h == "") h = "unknown"
-		printf "%s{\"mac\":\"%s\",\"ip\":\"%s\",\"host\":\"%s\"}", (n++ ? "," : ""), tolower($2), $3, h
-	}' /tmp/dhcp.leases 2>/dev/null)
+	# kidproxy merges leases with the per-device HTTPS inspection policy, so the
+	# card can show and change the decrypt switch. Falls back to [] if the DB or
+	# binary is missing, leaving the rest of the card usable.
+	devices=$(/usr/bin/kidproxy device list --config /etc/kidproxy/config.yaml 2>/dev/null | jsonfilter -e '@.devices')
+	[ -n "$devices" ] || devices='[]'
 	installed=false
 	[ -x "$SCHED_SCRIPT" ] && grep -q 'kids-schedule.sh apply' /etc/crontabs/root 2>/dev/null && installed=true
 	cat <<-EOF
-	{"installed": $installed, "now": "$(date '+%a %H:%M %Z')", "categories": [$categories], "kids": [$kids_json], "devices": [$devices]}
+	{"installed": $installed, "now": "$(date '+%a %H:%M %Z')", "categories": [$categories], "kids": [$kids_json], "devices": $devices}
 	EOF
 }
 
@@ -996,6 +997,39 @@ handle_post_with_data() {
 			sched_valid_mac "$mac" || { echo '{"ok":false,"message":"invalid MAC address"}'; return; }
 			uci del_list "kids_schedule.$id.mac=$mac"
 			sched_done "Device removed"
+			;;
+		device_intercept)
+			# Per-device TLS switch. Off still routes through the proxy (host
+			# rules apply) but stops decrypting, for devices that cannot
+			# install the CA. The proxy reloads the policy within a few seconds.
+			send_json
+			mac=$(echo "$POSTDATA" | jsonfilter -e '@.mac' 2>/dev/null | tr 'A-F' 'a-f' | tr '-' ':')
+			on=$(echo "$POSTDATA" | jsonfilter -e '@.intercept' 2>/dev/null)
+			sched_valid_mac "$mac" || { echo '{"ok":false,"message":"invalid MAC address"}'; return; }
+			case "$on" in
+				true|1|on) state=on ;;
+				false|0|off) state=off ;;
+				*) echo '{"ok":false,"message":"intercept must be on or off"}'; return ;;
+			esac
+			if /usr/bin/kidproxy device set --mac "$mac" --intercept "$state" >/dev/null 2>&1; then
+				if [ "$state" = off ]; then
+					echo '{"ok":true,"message":"HTTPS inspection off — still filtered by hostname"}'
+				else
+					echo '{"ok":true,"message":"HTTPS inspection on"}'
+				fi
+			else
+				echo '{"ok":false,"message":"could not update the device"}'
+			fi
+			;;
+		device_reset)
+			send_json
+			mac=$(echo "$POSTDATA" | jsonfilter -e '@.mac' 2>/dev/null | tr 'A-F' 'a-f' | tr '-' ':')
+			sched_valid_mac "$mac" || { echo '{"ok":false,"message":"invalid MAC address"}'; return; }
+			if /usr/bin/kidproxy device rm --mac "$mac" >/dev/null 2>&1; then
+				echo '{"ok":true,"message":"Device reset to the default (inspect)"}'
+			else
+				echo '{"ok":false,"message":"could not reset the device"}'
+			fi
 			;;
 		sched_block_add)
 			send_json

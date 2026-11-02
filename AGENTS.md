@@ -31,7 +31,9 @@ reach the box, and what's left. **Read it before touching anything** — several
    the Pi with `bad interpreter: /bin/sh^M`.
 6. There is an **optional kids network** (separate SSID, TLS-intercepting proxy,
    its own CA, full logging + alerts). It is off by default and does not touch the
-   adult LAN. Read [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md)
+   adult LAN. TLS decryption is switchable **per device** (`device_policy`), for
+   devices that cannot install the CA. Read
+   [`docs/reference/kids-filtering.md`](docs/reference/kids-filtering.md)
    before changing anything under `proxy/`, `config/kidproxy/` or the Kids panel.
 
 ---
@@ -205,6 +207,25 @@ LuCI names the session cookie after the scheme. Driving `https://192.168.1.1/…
 browser with a `/tmp/piadmin-sessions/<token>` value requires
 `document.cookie = "sysauth_https=<token>; path=/"`; plain `sysauth` is the HTTP one and
 gets you bounced to the login page.
+
+### 19. Per-device TLS interception is a DB flag, refreshed every 5 s
+`device_policy` (`proxy/policy.go`) decides whether a device's TLS is decrypted or
+blind-tunnelled. Unknown devices (no row, no lease) **default to decrypt** — turning
+inspection off is explicit. `Policy` reloads on a 5 s ticker (not 60 s like `Rules`),
+so a dashboard toggle applies almost immediately; `Policy.Close()` must be wired into
+`Store.Close()` or the goroutine outlives the DB. The gateway/CA-install hosts are
+**always** decrypted (`isBootstrapHost`) even for a no-intercept device, because the
+CA page and its trust probe need a real handshake. On a no-intercept device a blocked
+host is refused by **closing the connection** — there is no block page, because the
+device does not trust the CA and would only render a certificate error.
+
+### 20. The CA-trust probe must not create `tls-pin` noise
+The bootstrap page fetches `https://<host>/ca-probe` with `mode:'no-cors'`; success
+means the device accepted our CA. A failure is the expected answer for an
+untrusted device, so `bump` **skips the `error` event for bootstrap hosts** — otherwise
+every page load would raise a handshake alert. The answer is POSTed to
+`/ca-trust?ok=1|0` and stored by `setCATrustIfChanged`, throttled to one write per
+hour for the same answer.
 
 ---
 
