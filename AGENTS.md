@@ -372,6 +372,14 @@ device). Full checklist: `docs/reference/kids-filtering.md` §12.
 - **Kids network: only one client has been exercised** (a Windows laptop on
   `Home-Kids`, MAC `94:18:65:61:63:e1`). Android/iOS behaviour — especially
   user-CA trust and app-level pinning — is documented but not verified on hardware.
+- **Kids network: per-device HTTPS inspection is deployed (2026-11-02).** The
+  switch is `device_policy` (`kidproxy device set|rm|list`, dashboard **Decrypt
+  HTTPS**). Verified live through the explicit listener — tunnel without the CA,
+  decrypt with it, blocked host refused vs. `403`, `/ca-probe` + `/ca-trust`
+  recorded — and the dashboard card was driven end-to-end (toggle on/off, confirm
+  dialog, trust badge, failure hint, zero console errors). A real **no-intercept
+  kids client** has not been exercised. The kids network itself is currently
+  **off** (`kids-toggle.sh status` → `enabled=0`), so the proxy is not running.
 - **VPN DNS-leak closure (Phase 8.6):** real Surfshark creds are injected and
   multiple servers are configured in `/etc/wireguard/servers/`. What remains:
   wgvpn device-bind on https-dns-proxy + toggle switching dnsmasq upstream + a
